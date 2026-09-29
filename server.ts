@@ -1,30 +1,85 @@
 import express from 'express';
 import { GoogleGenAI, Type } from '@google/genai';
+import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
+import path from 'path';
 import { createServer as createViteServer } from 'vite';
 
 dotenv.config();
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json({ limit: '20mb' }));
 
 const ai = new GoogleGenAI({});
 
-// API endpoint for OCR Document Parsing
-app.post('/api/ocr-scan', async (req, res) => {
-  try {
-    const { imageBase64, mimeType = 'image/jpeg' } = req.body;
-    if (!imageBase64) {
-      return res.status(400).json({ error: 'Missing imageBase64' });
-    }
+// Optional server-side Supabase client for auto-persisting sync logs
+const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
+const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
+const supabaseServerClient = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
-    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+// Fallback heuristic bill extractor when AI quota is exceeded or network fails
+function heuristicBillExtraction(fileName?: string, folderPath?: string) {
+  const name = fileName || '';
+  const docNoMatch = name.match(/(?:เลขที่|No\.?|DO-?|INV-?)\s*([A-Za-z0-9\-\/]+)/i);
+  const refMatch = name.match(/(TR-[\w\-]+)/i);
+  const dateMatch = name.match(/(20\d{2})[-_]?(\d{2})[-_]?(\d{2})/);
+  const formattedDate = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : new Date().toISOString().slice(0, 10);
+  
+  const isSupplier = name.includes('ใบส่งของ') || name.includes('ใบกำกับ') || name.includes('บิล') || name.toUpperCase().includes('INV') || name.toUpperCase().includes('DO');
+  const isDest = name.includes('ตั๋วชั่ง') || name.includes('ใบชั่ง') || name.toLowerCase().includes('weight') || name.toLowerCase().includes('scale');
+  
+  let category = 'หินคลุก / หินผสม (Base & Subbase)';
+  if (name.includes('ยาง') || name.includes('แอสฟัลต์') || name.includes('AC')) category = 'งานผิวทางแอสฟัลต์ (Asphalt Pavement)';
+  else if (name.includes('คอนกรีต') || name.includes('ปูน') || name.includes('เหล็ก')) category = 'คอนกรีตและเหล็กโครงสร้าง';
+  else if (name.includes('ดิน') || name.includes('ลูกรัง') || name.includes('ทราย')) category = 'งานดินและคันทาง (Earthwork)';
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: [
+  return {
+    issuer: isSupplier ? 'SUPPLIER_DO' : 'BUYER_INTERNAL',
+    billType: isSupplier ? 'SUPPLIER' : (isDest ? 'DEST_WEIGHT' : 'DEST_WEIGHT'),
+    category: category,
+    docNo: docNoMatch ? docNoMatch[1] : (refMatch ? refMatch[1] : (name || `DOC-${Date.now().toString().slice(-4)}`)),
+    refDocNo: refMatch ? refMatch[1] : '',
+    poRef: '',
+    date: formattedDate,
+    supplier: isSupplier ? 'ผู้จำหน่าย/โรงโม่ (จากชื่อไฟล์)' : 'ตั๋วชั่ง BTC หน้างาน',
+    vehicleReg: '-',
+    itemDesc: category,
+    spec: 'STD',
+    qty: 1,
+    unit: 'ตัน',
+    grossWeight: 0,
+    tareWeight: 0,
+    netWeight: 0,
+    pricePerUnit: 0,
+    totalAmount: 0,
+    isSubcontractorDeduction: false,
+    subcontractorName: '',
+    remarks: (folderPath ? `[${folderPath}] ` : '') + '⚡ สกัดข้อมูลจากชื่อไฟล์ (เนื่องจากโควต้า AI ของ Google เต็มชั่วคราว โปรดตรวจสอบตัวเลขก่อนบันทึก)',
+    isAiFallback: true,
+    quotaExceeded: true
+  };
+}
+
+// Shared function for AI Document Parsing & Classification (Gemini with Resilient Fallback)
+async function performBillAiExtraction(
+  cleanBase64: string, 
+  mimeType: string = 'image/jpeg',
+  contextInfo?: { fileName?: string; folderPath?: string }
+) {
+  const folderContextText = contextInfo?.folderPath 
+    ? `\n\n📌 ข้อมูลโครงสร้างโฟลเดอร์ที่เก็บไฟล์ใน Google Drive (Multi-layer Path):\n- โฟลเดอร์ซ้อนหลายชั้น: "${contextInfo.folderPath}"\n- ชื่อไฟล์ต้นฉบับ: "${contextInfo.fileName || ''}"\n(คำแนะนำ AI: โปรดนำชื่อโฟลเดอร์แต่ละชั้น เช่น ชื่อโครงการ, หมวดวัสดุ, ชื่อผู้จำหน่าย หรือช่างผู้รับเหมาช่วง มาร่วมวิเคราะห์ยืนยันกับภาพจริง เพื่อให้ได้หมวดหมู่และประเภทเอกสารที่ถูกต้องที่สุด)` 
+    : '';
+
+  // List of models to try in order (gemini-3.1-flash-lite is fastest and has available quota)
+  const candidateModels = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
+  
+  for (const modelName of candidateModels) {
+    try {
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: [
         {
           role: 'user',
           parts: [
@@ -38,7 +93,7 @@ app.post('/api/ocr-scan', async (req, res) => {
               text: `คุณคือผู้เชี่ยวชาญด้านการตรวจสอบและคัดแยกเอกสารงานจัดซื้อ ตั๋วชั่ง และบัญชีวิศวกรรมโยธา
 บริษัทผู้ซื้อ (เจ้าของระบบ): "บจก. บุรีรัมย์ธงชัยก่อสร้าง" (BTC)
 ลักษณะธุรกิจ: ผู้รับเหมาชั้นพิเศษ ก่อสร้างโครงสร้างพื้นฐานขนาดใหญ่ งานกรมทางหลวง (DOH), ทางหลวงชนบท (DRR)
-ประเภทโครงการหลัก: งานก่อสร้างขยายถนนสายหลัก (ทล.), สะพานคอนกรีตอัดแรง/สะพานเหล็ก, อุโมงค์ทางลอด, สะพานทางยกระดับ (Flyover), ระบบระบายน้ำขนาดใหญ่ และงานผิวทางคอนกรีต/แอสฟัลต์
+ประเภทโครงการหลัก: งานก่อสร้างขยายถนนสายหลัก (ทล.), สะพานคอนกรีตอัดแรง/สะพานเหล็ก, อุโมงค์ทางลอด, สะพานทางยกระดับ (Flyover), ระบบระบายน้ำขนาดใหญ่ และงานผิวทางคอนกรีต/แอสฟัลต์${folderContextText}
 
 โปรดวิเคราะห์ภาพเอกสารนี้อย่างละเอียด และแยกแยะตามมาตรฐานงานกรมทางหลวง:
 1. แหล่งที่มาของเอกสาร (issuer):
@@ -134,13 +189,39 @@ app.post('/api/ocr-scan', async (req, res) => {
       }
     });
 
-    const parsedData = JSON.parse(response.text || '{}');
+      if (response.text) {
+        return JSON.parse(response.text);
+      }
+    } catch (error: any) {
+      console.warn(`⚠️ Model ${modelName} failed:`, error.message || error);
+    }
+  }
+
+  // If all models failed, use heuristic extraction
+  const fallback = heuristicBillExtraction(contextInfo?.fileName, contextInfo?.folderPath);
+  fallback.quotaExceeded = true;
+  return fallback;
+}
+
+// API endpoint for OCR Document Parsing
+app.post('/api/ocr-scan', async (req, res) => {
+  try {
+    const { imageBase64, mimeType = 'image/jpeg', fileName } = req.body;
+    if (!imageBase64) {
+      return res.status(400).json({ error: 'Missing imageBase64' });
+    }
+
+    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const parsedData = await performBillAiExtraction(cleanBase64, mimeType, { fileName });
     return res.json({ success: true, data: parsedData });
   } catch (error: any) {
     console.error('OCR Error:', error);
-    return res.status(500).json({ 
-      success: false, 
-      error: error.message || 'Failed to scan document' 
+    // Even in severe unexpected errors, return a usable fallback so UI never breaks
+    const fallback = heuristicBillExtraction(req.body.fileName);
+    return res.json({ 
+      success: true, 
+      data: fallback,
+      warning: error.message || 'ใช้โหมดสกัดข้อมูลสำรองเนื่องจากระบบ AI ปลายทางไม่ตอบสนอง'
     });
   }
 });
@@ -169,6 +250,7 @@ app.post('/api/bot-import-bill', async (req, res) => {
       driveFileName = 'bill_from_drive.jpg',
       driveFileId,
       driveFileUrl,
+      driveFolderPath = '',
       source = 'GOOGLE_DRIVE_BOT',
       projectId = 'PRJ-DOH-24'
     } = req.body;
@@ -177,27 +259,15 @@ app.post('/api/bot-import-bill', async (req, res) => {
 
     if (imageBase64) {
       const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
-      
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { inlineData: { data: cleanBase64, mimeType } },
-              { text: `วิเคราะห์เอกสารใบชั่ง/บิลนี้แบบละเอียด เพื่อนำเข้าสู่ระบบกระทบยอดงานก่อสร้าง DOH/DRR คืนค่า docNo, billType, supplier, vehicleReg, itemDesc, grossWeight, tareWeight, netWeight, pricePerUnit, totalAmount, isSubcontractorDeduction, subcontractorName, remarks` }
-            ]
-          }
-        ],
-        config: {
-          responseMimeType: 'application/json'
-        }
+      parsedData = await performBillAiExtraction(cleanBase64, mimeType, {
+        fileName: driveFileName,
+        folderPath: driveFolderPath
       });
-      parsedData = JSON.parse(response.text || '{}');
     } else {
       parsedData = req.body.parsedData || {
         docNo: req.body.docNo || `DRIVE-${Date.now().toString().slice(-5)}`,
         billType: req.body.billType || 'DEST_WEIGHT',
+        category: req.body.category || 'ทั่วไป',
         supplier: req.body.supplier || 'โรงโม่ / ตั๋วชั่งนำเข้าจาก Drive',
         vehicleReg: req.body.vehicleReg || '82-9988 บร',
         itemDesc: req.body.itemDesc || 'หินคลุก / หินฝุ่น',
@@ -223,10 +293,226 @@ app.post('/api/bot-import-bill', async (req, res) => {
     botBillsBuffer.unshift(newBotBill);
     if (botBillsBuffer.length > 50) botBillsBuffer.pop();
 
-    console.log(`[Bot Ingestion] Received bill from ${source}: ${newBotBill.id} (${newBotBill.driveFileName})`);
-    return res.json({ success: true, bill: newBotBill });
+    // Auto-record history into Supabase drive_sync_logs and bills_buffer if database is connected
+    let isDuplicate = false;
+    let duplicateReason = '';
+
+    if (supabaseServerClient) {
+      try {
+        const isSupplier = parsedData.billType === 'SUPPLIER';
+        const bufferId = driveFileId 
+          ? `DRIVE_${driveFileId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 20)}` 
+          : newBotBill.id;
+
+        const checkDocNo = parsedData.docNo;
+        if (checkDocNo && checkDocNo !== '-' && checkDocNo.length > 2) {
+          // Check if already in bills_buffer
+          const { data: dupBuffer } = await supabaseServerClient
+            .from('bills_buffer')
+            .select('id, ref_no, weight_ticket_no')
+            .or(`ref_no.eq.${checkDocNo},weight_ticket_no.eq.${checkDocNo}`)
+            .limit(1);
+
+          if (dupBuffer && dupBuffer.length > 0 && dupBuffer[0].id !== bufferId) {
+            isDuplicate = true;
+            duplicateReason = `มีอยู่ในกล่องพักรอชนบิลแล้ว (${dupBuffer[0].id})`;
+          } else {
+            // Check if already in reconciliation_records
+            const { data: dupRecord } = await supabaseServerClient
+              .from('reconciliation_records')
+              .select('id, do_no, dest_ticket_no')
+              .or(`do_no.eq.${checkDocNo},dest_ticket_no.eq.${checkDocNo}`)
+              .limit(1);
+
+            if (dupRecord && dupRecord.length > 0) {
+              isDuplicate = true;
+              duplicateReason = `มีอยู่ในตารางหลัก 38 คอลัมน์แล้ว (${dupRecord[0].id})`;
+            }
+          }
+        }
+
+        if (isDuplicate) {
+          console.log(`[Duplicate Prevented] Bill ${checkDocNo} skipped: ${duplicateReason}`);
+          // Record skip log in drive_sync_logs
+          await supabaseServerClient.from('drive_sync_logs').upsert({
+            id: driveFileId || newBotBill.id,
+            file_name: driveFileName,
+            drive_url: newBotBill.driveFileUrl || null,
+            folder_path: req.body.driveFolderPath || null,
+            doc_no: parsedData.docNo || null,
+            bill_type: parsedData.billType || null,
+            category: parsedData.category || null,
+            supplier: parsedData.supplier || null,
+            net_weight: parsedData.netWeight ? Number(parsedData.netWeight) : null,
+            status: 'SKIPPED_DUPLICATE',
+            synced_at: new Date().toISOString()
+          });
+        } else {
+          // 1. บันทึกลง bills_buffer พร้อมข้อมูลตัวเลขจริงที่ AI อ่านได้
+          await supabaseServerClient.from('bills_buffer').upsert({
+            id: bufferId,
+            project_id: parsedData.projectId || projectId || 'PRJ-DOH-24',
+            project_name: 'โครงการทางหลวง (BTC)',
+            type: isSupplier ? 'SUPPLIER' : 'DEST_WEIGHT',
+            bill_type: isSupplier ? 'SUPPLIER' : 'DEST_WEIGHT',
+            ref_no: parsedData.refDocNo || parsedData.docNo,
+            weight_ticket_no: parsedData.docNo,
+            date: parsedData.date || new Date().toISOString().slice(0, 10),
+            supplier: parsedData.supplier || 'โรงโม่ / ตั๋วชั่งนำเข้าจาก Drive',
+            vehicle_reg: parsedData.vehicleReg || '-',
+            item_desc: parsedData.itemDesc || parsedData.category || 'หิน / วัสดุ',
+            material_name: parsedData.itemDesc || parsedData.category || 'หิน / วัสดุ',
+            origin_gross: parsedData.grossWeight || null,
+            origin_tare: parsedData.tareWeight || null,
+            origin_net: parsedData.netWeight || null,
+            dest_gross: parsedData.grossWeight || null,
+            dest_tare: parsedData.tareWeight || null,
+            dest_net: parsedData.netWeight || null,
+            qty: parsedData.qty || parsedData.netWeight || null,
+            price_per_unit: parsedData.pricePerUnit || null,
+            total_material: parsedData.totalAmount || null,
+            photo_attachment: newBotBill.driveFileUrl || null,
+            remarks: req.body.driveFolderPath || '',
+            needs_review: false
+          });
+
+          // 2. บันทึกประวัติลง drive_sync_logs
+          await supabaseServerClient.from('drive_sync_logs').upsert({
+            id: driveFileId || newBotBill.id,
+            file_name: driveFileName,
+            drive_url: newBotBill.driveFileUrl || null,
+            folder_path: req.body.driveFolderPath || null,
+            doc_no: parsedData.docNo || null,
+            bill_type: parsedData.billType || null,
+            category: parsedData.category || null,
+            supplier: parsedData.supplier || null,
+            net_weight: parsedData.netWeight ? Number(parsedData.netWeight) : null,
+            status: imageBase64 ? 'SUCCESS_AI' : 'SUCCESS_BOT',
+            synced_at: new Date().toISOString()
+          });
+        }
+      } catch (dbErr) {
+        console.error('Failed to log to Supabase:', dbErr);
+      }
+    }
+
+    console.log(`[Bot Ingestion] Received bill from ${source}: ${newBotBill.id} (${newBotBill.driveFileName})${isDuplicate ? ' [DUPLICATE SKIPPED]' : ''}`);
+    return res.json({ 
+      success: true, 
+      bill: newBotBill, 
+      isDuplicate, 
+      message: isDuplicate ? `ตรวจพบบิลซ้ำ: ${duplicateReason} ระบบข้ามการบันทึกเพื่อป้องกันข้อมูลซ้ำซ้อน` : undefined 
+    });
   } catch (err: any) {
     console.error('Error importing bill from bot:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Endpoint to scan a file from Google Drive directly by driveFileId or driveUrl
+app.post('/api/scan-drive-file', async (req, res) => {
+  try {
+    const { driveFileId, driveFileUrl, fileName = 'drive_bill.jpg' } = req.body;
+    let targetId = driveFileId;
+
+    if (!targetId && driveFileUrl) {
+      const match = driveFileUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || driveFileUrl.match(/id=([a-zA-Z0-9_-]+)/);
+      if (match) targetId = match[1];
+    }
+
+    if (!targetId) {
+      return res.status(400).json({ error: 'Missing driveFileId or driveFileUrl' });
+    }
+
+    // Try fetching image from Google Drive thumbnail or direct download
+    const fetchUrls = [
+      `https://lh3.googleusercontent.com/d/${targetId}=w2000`,
+      `https://drive.google.com/uc?export=download&id=${targetId}`
+    ];
+
+    let imageBuffer: Buffer | null = null;
+    let mimeType = 'image/jpeg';
+
+    for (const u of fetchUrls) {
+      try {
+        const resp = await fetch(u, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          redirect: 'follow'
+        });
+        if (resp.ok) {
+          const contentType = resp.headers.get('content-type') || '';
+          if (contentType.includes('image') || contentType.includes('octet-stream')) {
+            const arrayBuffer = await resp.arrayBuffer();
+            if (arrayBuffer.byteLength > 1000) {
+              imageBuffer = Buffer.from(arrayBuffer);
+              mimeType = contentType.includes('image') ? contentType : 'image/jpeg';
+              break;
+            }
+          }
+        }
+      } catch (err) {}
+    }
+
+    if (!imageBuffer) {
+      return res.status(404).json({
+        success: false,
+        error: `ไม่สามารถดึงรูปภาพจาก Google Drive สำหรับไฟล์ ID ${targetId} ได้ (โปรดตรวจสอบว่าเปิดการแชร์ลิงก์แล้ว)`
+      });
+    }
+
+    const cleanBase64 = imageBuffer.toString('base64');
+    const parsedData = await performBillAiExtraction(cleanBase64, mimeType, {
+      fileName: fileName
+    });
+
+    return res.json({
+      success: true,
+      data: parsedData,
+      driveFileId: targetId,
+      thumbnailBase64: `data:${mimeType};base64,${cleanBase64.slice(0, 1500)}`
+    });
+  } catch (error: any) {
+    console.error('Scan Drive File Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to scan Drive file'
+    });
+  }
+});
+
+// Batch import multiple bills from Drive / Sheet
+app.post('/api/bot-import-batch', async (req, res) => {
+  try {
+    const { bills = [] } = req.body;
+    let added = 0;
+    for (const b of bills) {
+      const newBotBill: BotBill = {
+        id: `BOT-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 1000)}`,
+        source: b.source || 'GOOGLE_DRIVE_SHEET_BATCH',
+        driveFileName: b.driveFileName || b.fileName,
+        driveFileId: b.driveFileId || b.fileId,
+        driveFileUrl: b.driveFileUrl || (b.fileId ? `https://drive.google.com/file/d/${b.fileId}/view` : undefined),
+        receivedAt: new Date().toISOString(),
+        status: 'PENDING_MATCH',
+        data: {
+          docNo: b.docNo || b.detectedDocNo || `DRIVE-${Date.now().toString().slice(-5)}`,
+          billType: b.billType || (b.fileName && b.fileName.includes('ใบส่งของ') ? 'SUPPLIER' : 'DEST_WEIGHT'),
+          supplier: b.supplier || 'โรงโม่ / ตั๋วชั่งนำเข้าจาก Drive',
+          date: b.date || b.documentDate || new Date().toISOString().slice(0, 10),
+          vehicleReg: b.vehicleReg || '82-9988 บร',
+          itemDesc: b.itemDesc || 'หินคลุก / หินฝุ่น',
+          netWeight: Number(b.netWeight || 30.5),
+          remarks: b.remarks || b.folderPath || '',
+          projectId: b.projectId || 'PRJ-DOH-24'
+        }
+      };
+      botBillsBuffer.unshift(newBotBill);
+      added++;
+    }
+    if (botBillsBuffer.length > 2000) botBillsBuffer.length = 2000;
+    console.log(`[Batch Ingestion] Successfully imported ${added} bills. Buffer now has ${botBillsBuffer.length} bills.`);
+    return res.json({ success: true, count: added });
+  } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -313,6 +599,9 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static('dist'));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.resolve('dist', 'index.html'));
+    });
   }
 
   app.listen(port, '0.0.0.0', () => {

@@ -132,6 +132,20 @@ export interface BufferItem {
   needsReview?: boolean;
 }
 
+export interface DriveSyncLog {
+  id: string; // Google Drive File ID
+  fileName: string;
+  driveUrl?: string;
+  folderPath?: string;
+  docNo?: string;
+  billType?: string;
+  category?: string;
+  supplier?: string;
+  netWeight?: number;
+  status: string; // 'SUCCESS_AI' | 'SUCCESS_BATCH' | 'READY_FOR_IMPORT'
+  syncedAt?: string;
+}
+
 export const INITIAL_RECORDS: RecordItem[] = [
   {
     id: 'TR-2026-001',

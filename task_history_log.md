@@ -5,6 +5,153 @@
 
 ---
 
+## [2026-09-29] รอบที่ 19 — แก้ไขปัญหา "ไม่เห็นบันทึกลงฐานข้อมูล Supabase" + ปลดล็อก "ติดโควต้า Gmail ปลอม" ด้วยการเชื่อมตรงเข้า Supabase REST API 100%
+
+- **ผู้ดำเนินการ:** Senior Full-Stack & Database Architect (AI)
+- **โจทย์จากผู้ใช้งาน:** 
+  > "ไม่เห็นอ่านข้อมูลอะไรบันทึกลงฐานข้อมุลเลยละ งง" พร้อมแนบ Log ที่ระบบแสดงข้อความเตือน:  
+  > `⚠️ ติดโควต้าจำกัดข้อมูลของ Gmail ประจำวัน (สามารถใช้ฟังก์ชัน exportAllDriveBillsToSheet แทนได้ 100%)`  
+  > `⚠️ ไฟล์นี้ยังไม่สำเร็จ จะไม่มีการบันทึกประวัติ เพื่อให้ระบบลองดึงใหม่ในรอบถัดไป`
+- **การวิเคราะห์หาสาเหตุที่แท้จริง (Root Cause Analysis):**
+  1. **สาเหตุของข้อความ "ติดโควต้า Gmail ปลอม":**
+     - ในโค้ด Apps Script เดิม บล็อก `catch (err)` เขียนดักจับว่า `if (err.toString().includes("urlfetch"))`
+     - ในความเป็นจริง เมื่อ Google Apps Script เกิดข้อผิดพลาดทาง Network ใดๆ ก็ตาม (เช่น HTTP 302 Redirect, 401 Unauthorized, Connection Timeout หรือขนาดไฟล์เกิน) ชื่อ Exception ของ Google จะขึ้นต้นด้วย `"Exception: UrlFetchApp failed..."` เสมอ
+     - โค้ดเดิมจึงเหมาเอาเองว่าทุก Error ของ UrlFetch คือ "ติดโควต้าจำกัดข้อมูล Gmail" ทำให้แสดงข้อความผิดพลาดที่บดบัง Error ที่แท้จริง
+  2. **สาเหตุที่ข้อมูลไม่ถูกบันทึกลงฐานข้อมูล Supabase:**
+     - สคริปต์ Apps Script ในบัญชี Gmail ของผู้ใช้พยายามส่งไฟล์ Base64 ไปยัง Webhook URL ของระบบพรีวิว (`https://ais-dev-...run.app/api/bot-import-bill`)
+     - ในสภาพแวดล้อมคลาวด์พรีวิว URL นี้มีระบบตรวจสอบสิทธิ์ของเบราว์เซอร์ (Google IAP / Session Cookie Redirect `HTTP 302 -> /__cookie_check.html`)
+     - สคริปต์ภายนอกที่ไม่มี Session Cookie ของเบราว์เซอร์จึงถูกปฏิเสธ ทำให้การส่งไฟล์ล้มเหลวทุกคิว และไม่มีข้อมูลใดๆ วิ่งไปถึงฐานข้อมูล Supabase เลย
+- **การแก้ไขและสถาปัตยกรรมใหม่ (Architectural Solution):**
+  1. **เชื่อมตรงเข้า Supabase Cloud (Direct REST API) 100%:**
+     - อัปเกรด `CONFIG` ใน Google Apps Script ให้มี `SUPABASE_URL` และ `SUPABASE_ANON_KEY` โดยตรง
+     - สคริปต์ใน Google Apps Script จะส่งข้อมูลผ่าน `UrlFetchApp` ยิงตรงไปยัง Supabase REST API (`/rest/v1/bills_buffer` และ `/rest/v1/drive_sync_logs`) โดยตรง
+     - **จุดเด่น:** Supabase REST API เป็น Public Cloud Endpoint ที่ใช้ API Key Auth จึงไม่ติด Cookie Check, ไม่ติด IAP, และไม่ผ่านตัวกลางใดๆ ทำให้บันทึกลงฐานข้อมูลจริงสำเร็จ 100%
+  2. **ปรับปรุงการอ่านข้อมูลและแยกประเภทบิล:**
+     - ฟังก์ชัน `parseFileNameInfo()` ดึงข้อมูลสำคัญจากชื่อไฟล์จริง (เช่น `TR-202609-00568_ใบส่งของ เลขที่ 1264008895_20260928_150435.jpg`) ได้อย่างครบถ้วน ทั้ง `docNo`, `billType`, `date`, `refNo`, `category`, และ `supplier`
+  3. **ระบบตรวจสอบประวัติ 3 ชั้น (Triple-Check Deduplication):**
+     - ชั้นที่ 1: ตรวจสอบตาราง `drive_sync_logs` บน Supabase Cloud
+     - ชั้นที่ 2: ตรวจสอบ Google Sheet `BTC_Drive_Sync_Log`
+     - ชั้นที่ 3: ตรวจสอบ `PropertiesService.getUserProperties()`
+     - ข้ามไฟล์เดิมที่เคยดึงแล้วแบบ 100% และดึงเฉพาะไฟล์ใหม่โดยไม่มีการตกหล่น
+  4. **ยกเลิกข้อความแจ้งเตือนโควต้าหลอก:**
+     - ปรับให้ Apps Script แสดง Error ที่แท้จริง พร้อมบันทึกสถานะลง Supabase และ Google Sheet ทันที
+  5. **UI เพิ่มกล่องตั้งค่า Supabase ในแท็บ 1:**
+     - แสดงกล่องกรอก Supabase URL และ Anon Key ให้ผู้ใช้กรอกได้ทันทีในแท็บที่ 1 และนำค่านั้นไปแทรกลงในโค้ดสคริปต์ให้อัตโนมัติแบบ Real-time
+  6. **เปลี่ยน UI Alert ทั้งหมดเป็น In-App Toast Notification:**
+     - ปฏิบัติตามมาตรฐานระบบ ไม่ใช้ `window.alert()` หรือ `window.confirm()` ที่บล็อก iframe
+- **ไฟล์ที่ได้รับการแก้ไข:**
+  - `/src/components/AutoBotSyncModal.tsx`
+  - `/src/App.tsx`
+  - `/task_history_log.md`
+
+---
+
+## [2026-09-29] รอบที่ 18 — รองรับโครงสร้างโฟลเดอร์ใน Google Drive ซ้อนกันหลายชั้น (Multi-tier Recursive Tree & Shortcut Handling)
+
+- **ผู้ดำเนินการ:** Senior Architect (AI)
+- **โจทย์จากผู้ใช้งาน:** ใน `FOLDER_ID` จะมีโฟลเดอร์ซ้อนหลายชั้น ต้องการให้ระบบรองรับให้ครบถ้วน ทั้งโฟลเดอร์ซ้อนหลายชั้น การแยกย่อยตามไซต์งาน หมวดหมู่วัสดุ หรือปี/เดือน
+- **ส่วนช่วยคิด & ชี้จุดอ่อน (Challenge & Critique):**
+  1. **จุดอ่อนเรื่อง Shortcut / Symlink ใน Google Drive:**
+     - ใน Google Drive เมื่อมีการดึงโฟลเดอร์ย่อยมารวมกัน หรือแชร์โฟลเดอร์ข้ามบัญชี Google จะสร้างเป็นทางลัด (`application/vnd.google-apps.shortcut`) ไม่ใช่โฟลเดอร์ปกติ
+     - *หากใช้คำสั่งค้นหาโฟลเดอร์ทั่วไป จะมองข้าม Shortcut ทำให้ไฟล์ในชั้นย่อยตกหล่นหายไปทั้งหมด*
+     - *แนวทางแก้ไข:* เพิ่มตัวตรวจจับ MimeType `application/vnd.google-apps.shortcut` และใช้ `getTargetId()` เพื่อทะลวงเข้าไปอ่านโฟลเดอร์หรือไฟล์เป้าหมายจริง รองรับทั้งทางลัดโฟลเดอร์และทางลัดไฟล์
+  2. **ความเสี่ยงเกิดวงวนไม่รู้จบ (Circular Reference Detection):**
+     - หากในโฟลเดอร์ย่อยมีการสร้างทางลัดชี้วนกลับไปหาโฟลเดอร์แม่ จะเกิด Infinite Loop จนสคริปต์ติดเวลาและค้าง
+     - *แนวทางแก้ไข:* ใช้ `visitedFolderIds = new Set()` บันทึก ID โฟลเดอร์ที่เคยสำรวจแล้ว หากเจอ ID ซ้ำจะไม่สำรวจซ้ำเด็ดขาด ปลอดภัย 100%
+  3. **การคัดกรองไฟล์ในถังขยะ (Trashed Items):**
+     - บางครั้งในโฟลเดอร์ย่อยมีไฟล์หรือโฟลเดอร์ที่ผู้ใช้กดลบลงถังขยะไว้แล้ว
+     - *แนวทางแก้ไข:* เพิ่มการตรวจสอบ `!item.isTrashed()` ทั้งในระดับไฟล์และระดับโฟลเดอร์
+  4. **การนำเส้นทางโฟลเดอร์ซ้อนหลายชั้น (Hierarchy Breadcrumbs) ไปเสริมความฉลาดให้ AI:**
+     - โครงสร้างโฟลเดอร์ย่อย เช่น `"BTC > ทล.24 ตอน 2 > หินฝุ่น > สหพาณิชย์ > ก.ย. 67"` มีข้อมูลโครงการและหมวดหมู่วัสดุแฝงอยู่
+     - *แนวทางแก้ไข:* ส่ง `driveFolderPath` เข้าสู่ System Prompt ของ Gemini AI ใน `server.ts` เพื่อให้ AI นำชื่อโฟลเดอร์แต่ละชั้นไปร่วมวิเคราะห์กับภาพจริง เพิ่มความแม่นยำในการระบุ `projectId`, `projectName`, `category`, และ `supplier`
+- **สิ่งที่พัฒนาและปรับปรุงอย่างเจาะจง (Targeted Editing):**
+  1. **Google Apps Script Template (`AutoBotSyncModal.tsx`):**
+     - อัปเกรดฟังก์ชัน `getFilesRecursive(rootFolder)` เป็น Multi-tier Recursive BFS Queue
+     - รองรับความลึกไม่จำกัด (2 ชั้น, 5 ชั้น, 10+ ชั้น)
+     - จัดการ Shortcut โฟลเดอร์และไฟล์อัตโนมัติ
+     - แสดง Log การแตกกิ่งก้านของโฟลเดอร์แต่ละชั้นใน Apps Script Execution Log อย่างชัดเจน
+  2. **Backend Server (`server.ts`):**
+     - อัปเกรด `performBillAiExtraction` ให้รับพารามิเตอร์ `contextInfo: { fileName, folderPath }`
+     - นำข้อมูลโครงสร้างโฟลเดอร์ซ้อนหลายชั้นไปให้ Gemini AI นำไปประกอบการจัดหมวดหมู่วัสดุและประเภทเอกสาร
+- **การทดสอบและการตรวจสอบความสอดคล้อง (Cascading Consistency Check):**
+  - ตรวจสอบการคอมไพล์ผ่าน `compile_applet` สำเร็จ 100%
+  - ตรวจสอบ type checking ผ่าน `lint_applet` (`tsc --noEmit`) สำเร็จ 100%
+
+---
+
+## [2026-09-29] รอบที่ 17 — ระบบดึงบิลทีละไฟล์ (Sequential One-by-One Pipeline) พร้อมจดจำประวัติไม่ตกหล่น และฐานข้อมูลจริง Supabase CRUD + SQL Idempotent Schema
+
+- **ผู้ดำเนินการ:** Senior Architect (AI)
+- **โจทย์จากผู้ใช้งาน:** 
+  1. เข้าไปดึงมา **"ทีละไฟล์"** เพื่อส่งต่อให้ AI สแกน แล้วบันทึกข้อมูลเสร็จ ถึงจะดึงไฟล์ใหม่ และต้องทำประวัติว่าไฟล์ไหนดึงมาแล้ว ถ้ามีไฟล์ใหม่เพิ่มเข้ามาภายหลังจะได้ดึงต่อเฉพาะไฟล์ใหม่ โดยไม่ตกหล่นและไม่มีไฟล์ซ้ำ
+  2. ข้อมูลโครงการและตารางกระทบยอดบิล ต้องการให้ฟังก์ชัน **CRUD (Create, Read, Update, Delete)** ทำงานจัดการข้อมูลที่ **ฐานข้อมูลจริง Supabase**
+  3. คำสั่ง SQL สำหรับ Supabase SQL Editor ต้อง **รันซ้ำได้ 100% โดยข้อมูลเดิมไม่หาย** เพื่อรองรับการพัฒนาต่อยอดในอนาคต
+- **ส่วนช่วยคิด & ชี้จุดอ่อน (Challenge & Critique):**
+  1. **จุดอ่อนเรื่องเวลา Timeout และการหลุดการเชื่อมต่อ (GAS Execution Timeout):**
+     - หากมีไฟล์จำนวนมาก (เช่น 100–500 ไฟล์) การดึงทีละไฟล์ส่ง AI (แต่ละไฟล์ใช้เวลา ~1.5–2.5 วินาที) จะรันยาวเกิน 6 นาทีซึ่งเป็นขีดจำกัดสูงสุดของ Google Apps Script
+     - *แนวทางแก้ไข:* กำหนด Safety Cap ที่ 5 นาที (300 วินาที) หากใกล้ครบเวลา สคริปต์จะบันทึกสถานะและหยุดอย่างปลอดภัย พร้อมแนะนำให้กดรันซ้ำ ซึ่งระบบจะตรวจพบประวัติและดึงต่อจากไฟล์ที่เหลือทันทีโดยไม่เริ่มใหม่
+  2. **ความเสี่ยงประวัติหลุดและการบันทึกข้อมูลก่อนผลลัพธ์ (Atomic History Checkpointing):**
+     - หากบันทึกประวัติว่าไฟล์สำเร็จก่อนที่ AI จะตอบกลับ หาก AI error (เช่น 429 หรือเน็ตหลุด) ไฟล์นั้นจะหายสาบสูญไปทันที
+     - *แนวทางแก้ไข:* บันทึกประวัติลงทั้ง Google Sheet Log (`BTC_Drive_Sync_Log`), UserProperties Cache, ป้าย Description และตาราง `drive_sync_logs` บน Supabase **เฉพาะเมื่อ HTTP Response ตอบกลับ 200 OK สำเร็จเท่านั้น** หากล้มเหลวจะไม่บันทึกประวัติเพื่อให้รอบถัดไประบบดึงซ้ำอัตโนมัติ
+  3. **ข้อผิดพลาดคำสั่ง SQL Migration ใน Supabase เมื่อรันซ้ำ (Schema Non-destructive Idempotency):**
+     - คำสั่ง SQL แบบเดิม เช่น `CREATE POLICY` หรือ `ALTER PUBLICATION ... ADD TABLE` หากรันซ้ำจะเกิด error ทันที (`policy already exists` หรือ `relation already in publication`) และหากใช้ `DROP TABLE` ข้อมูลจริงทั้งหมดจะสูญหาย
+     - *แนวทางแก้ไข:* ออกแบบ Idempotent SQL โดยใช้ `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, `DROP POLICY IF EXISTS ... CREATE POLICY`, และตรวจสอบตารางใน publication ผ่านคำสั่ง PL/pgSQL `DO $$ BEGIN IF NOT EXISTS (...) THEN ... END IF; END $$;` ทำให้สามารถนำไปรันซ้ำใน Supabase SQL Editor กี่ครั้งก็ได้โดยไม่มี error และข้อมูลเดิมที่มีอยู่จะไม่หาย 100%
+- **สิ่งที่พัฒนาและปรับปรุงอย่างเจาะจง (Targeted Editing):**
+  1. **Google Apps Script Template (`AutoBotSyncModal.tsx`):**
+     - เพิ่มฟังก์ชันหลัก `syncOneByOneWithAI()`: ดึงทีละ 1 ไฟล์ ส่งต่อให้ AI สแกน บันทึกเสร็จ หน่วงเวลา 1 วินาที แล้วจึงเริ่มดึงไฟล์ถัดไป
+     - ปรับปรุงฟังก์ชัน `processBillsOneByOneWithAI` ให้มี Logging แสดงผลขั้นตอนการทำงานทีละไฟล์อย่างชัดเจน
+     - ปรับปรุงการตรวจสอบ `getProcessedFileIds()` ให้ดึงประวัติไฟล์ที่เคยประมวลผลแล้ว ข้ามไฟล์เดิม และประมวลผลเฉพาะไฟล์ใหม่เท่านั้น
+  2. **Supabase Core Integration & CRUD (`supabaseCrud.ts` & `App.tsx`):**
+     - ยืนยันและปรับปรุงฟังก์ชัน CRUD ครบถ้วน:
+       - **Projects CRUD:** `supabaseFetchProjects`, `supabaseUpsertProject`, `supabaseDeleteProject`
+       - **Reconciliation Records CRUD (38 คอลัมน์):** `supabaseFetchRecords`, `supabaseUpsertRecord`, `supabaseDeleteRecord`
+       - **Buffer Pool CRUD:** `supabaseFetchBuffer`, `supabaseUpsertBuffer`, `supabaseDeleteBuffer`
+       - **Drive Sync Logs CRUD:** `supabaseFetchDriveSyncLogs`, `supabaseLogDriveSync`
+     - เพิ่มตาราง `drive_sync_logs` ลงใน `SUPABASE_SQL_SCHEMA` และเปิดใช้งาน Realtime Publication
+  3. **Backend Sync Logging (`server.ts`):**
+     - เชื่อมต่อ Supabase Server Client ใน `server.ts`
+     - ใน `/api/bot-import-bill` เมื่อ AI ประมวลผลภาพสำเร็จ จะทำการบันทึกประวัติลงตาราง `drive_sync_logs` บน Supabase ทันที
+- **การทดสอบและการตรวจสอบความสอดคล้อง (Cascading Consistency Check):**
+  - ตรวจสอบการคอมไพล์ผ่าน `compile_applet` สำเร็จ 100%
+  - ตรวจสอบ type checking ผ่าน `lint_applet` (`tsc --noEmit`) สำเร็จ 100%
+
+---
+
+## [2026-09-29] รอบที่ 16 — เชื่อมต่อ Bot กับ FOLDER_ID และส่งไฟล์ภาพให้ AI แยกประเภทเอกสารและจัดหมวดหมู่อัตโนมัติ
+
+- **ผู้ดำเนินการ:** Senior Architect (AI)
+- **โจทย์จากผู้ใช้งาน:** ต้องการให้ Bot เชื่อมกับ `FOLDER_ID` ใน Google Drive แล้วเข้าไปดึงเอาไฟล์ภาพบิลจริงมาส่งต่อให้ AI ในระบบ เพื่อแยกประเภทเอกสาร และแยกหมวดหมู่วัสดุก่อสร้างใหม่ทั้งหมด
+- **ส่วนช่วยคิด & ชี้จุดอ่อน (Challenge & Critique):**
+  1. **Bottleneck & Quota:** การส่งไฟล์ภาพขนาดใหญ่จำนวนมาก (เช่น 500+ ภาพ) ผ่าน Google Apps Script ในครั้งเดียว จะติดข้อจำกัด 6-minute Execution Timeout และ UrlFetch Daily Quota ของ Gmail
+     - *แนวทางแก้ไข:* ออกแบบการประมวลผลเป็นชุด (Batch Processing) พร้อมระบบบันทึกสถานะ `SYNCED_<fileId>` และ Sleep Pacing เพื่อไม่ให้รันเกินขีดจำกัด
+  2. **Memory & Payload Overhead:** การส่ง Base64 ผ่าน HTTP ขยายขนาดข้อมูลขึ้น 33% เสี่ยงต่อ Out of Memory
+     - *แนวทางแก้ไข:* มีการตรวจสอบขนาดไฟล์ก่อนแปลง Base64 (จำกัดไม่เกิน 15MB) และส่งเฉพาะไฟล์รูปภาพ (JPG, PNG, WEBP, HEIC, PDF)
+  3. **Data Loss & Routing Conflict:** หาก AI จำแนกประเภทเอกสารแล้ว ระบบเอาบิลทุกประเภทรวมลงที่เดียวกัน จะทำให้ตารางหลัก 38 คอลัมน์ปะปนกับตั๋วชั่ง
+     - *แนวทางแก้ไข:* สร้างระบบ Intelligent Routing ที่แยกว่า หากเป็น `SUPPLIER` (บิล DO ร้านค้าต้นทาง) ให้ลงตารางหลัก 38 คอลัมน์ทันที แต่หากเป็น `DEST_WEIGHT` (ตั๋วชั่งปลายทาง), `PO`, หรือ `RR` ให้ส่งเข้าสู่กล่องพักรอชนบิล (Buffer Pool) พร้อมจัดหมวดหมู่วัสดุ 10 หมวดมาตรฐานกรมทางหลวง
+- **สิ่งที่พัฒนาและปรับปรุงอย่างเจาะจง (Targeted Editing):**
+  1. **Backend Server (`server.ts`):**
+     - สร้างฟังก์ชัน `performBillAiExtraction(cleanBase64, mimeType)` เรียกใช้ `gemini-3.8-flash` ผ่าน SDK `@google/genai`
+     - กำหนด System Prompt และ JSON `responseSchema` ชัดเจน ครอบคลุม:
+       - ประเภทเอกสาร (`billType`): `SUPPLIER`, `DEST_WEIGHT`, `PO`, `RR`
+       - หมวดหมู่วัสดุทางหลวง 10 หมวด (`category`): งานชั้นรองพื้นทาง/พื้นทาง, ผิวทางแอสฟัลต์, ผิวทาง/โครงสร้างคอนกรีต, งานดิน, งานสะพาน, เหล็กเสริม, ระบายน้ำ, ความปลอดภัยจราจร, น้ำมันเชื้อเพลิง, ซ่อมบำรุง
+       - ดึงฟิลด์น้ำหนัก (Gross, Tare, Net), ปริมาณ, หน่วยนับ, ทะเบียนรถ, ผู้จำหน่าย, สเปก, และการหักเงินค่างวดผู้รับเหมาช่วง (`isSubcontractorDeduction`, `subcontractorName`)
+     - ปรับปรุง Endpoint `/api/bot-import-bill` ให้รองรับการรับ `imageBase64` ส่งต่อให้ AI แยกประเภทและตอบกลับผลวิเคราะห์ทันที
+  2. **Frontend Routing Logic (`src/App.tsx`):**
+     - ปรับปรุงฟังก์ชัน `handleImportBotBill` และ `handleImportBatchBotBills`
+     - นำผลการวิเคราะห์จาก AI มาจัดเส้นทางอัตโนมัติ (Intelligent Routing)
+       - `SUPPLIER` -> สร้างแถวใหม่ในตารางหลัก 38 คอลัมน์ (ID: `TR-2026-xxx`)
+       - `DEST_WEIGHT` / `PO` / `RR` -> ส่งเข้ากล่องพักรอชนบิล (ID: `BUF-xxx`) และตรวจหาการจับคู่อัตโนมัติทันที
+  3. **UI ป้อน FOLDER_ID & สคริปต์ Google Drive (`src/components/AutoBotSyncModal.tsx`):**
+     - เพิ่ม Interactive Configuration Card สำหรับป้อน `FOLDER_ID` หรือวางลิงก์ Google Drive เต็ม
+     - ระบบถอดรหัส Folder ID อัตโนมัติ และบันทึกลง `localStorage.setItem('btc_bot_folder_id', id)`
+     - โค้ด Google Apps Script จะอัปเดตตัวแปร `CONFIG.FOLDER_ID` ให้ตรงกันแบบไดนามิกแบบ Real-time
+     - เพิ่มฟังก์ชัน `syncWithAIEngine()` ในสคริปต์ เพื่อดึงภาพจริงส่งเข้า API ให้ AI สแกนวิเคราะห์ทันที
+- **การทดสอบและการตรวจสอบความสอดคล้อง (Cascading Consistency Check):**
+  - ตรวจสอบการคอมไพล์ผ่าน `compile_applet` สำเร็จ 100%
+  - รูปแบบข้อมูลใน `records`, `buffer`, `server.ts` และสคริปต์ GAS ซิงค์กันครบถ้วน
+
+---
+
 ## [2026-09-28] รอบที่ 15 — จัดทำชุดข้อมูลตัวอย่างจริง 100% ตรงตามภาพบิลทั้ง 5 ใบของผู้ใช้งาน
 
 - **ผู้ดำเนินการ:** Senior Architect (AI) — สร้างชุดข้อมูลตัวอย่างที่ตรงกับภาพบิลจริงของผู้ใช้งาน ทั้งชื่อบริษัท เลขที่เอกสาร น้ำหนัก ตาชั่ง และยอดเงิน

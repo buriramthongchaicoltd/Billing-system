@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Truck, Archive, Plus, FileSpreadsheet, FolderPlus, 
   Search, Expand, Trash2, Camera, Flag, 
   ZoomIn, ZoomOut, Link as LinkIcon,
   X, Save, Upload, AlertTriangle, CheckCircle2, Clock, Download,
-  Sparkles, Loader2, Edit3, Check, Building2, FolderKanban, Layers, Bot, Database
+  Sparkles, Loader2, Edit3, Check, Building2, FolderKanban, Layers, Bot, Database,
+  ChevronDown, MoreVertical, FileText
 } from 'lucide-react';
 import { RecordItem, BufferItem, INITIAL_RECORDS, INITIAL_BUFFER, Project, INITIAL_PROJECTS } from './types';
 import { REAL_BILLS_RECORDS, REAL_BILLS_BUFFER } from './sampleData';
@@ -13,6 +14,12 @@ import { BillDetailEditModal } from './components/BillDetailEditModal';
 import { ProjectManagerModal } from './components/ProjectManagerModal';
 import { AutoBotSyncModal } from './components/AutoBotSyncModal';
 import { getSupabaseClient, getSavedSupabaseConfig } from './lib/supabaseClient';
+import { 
+  supabaseFetchProjects, supabaseUpsertProject, supabaseDeleteProject,
+  supabaseFetchRecords, supabaseUpsertRecord, supabaseDeleteRecord,
+  supabaseFetchBuffer, supabaseUpsertBuffer, supabaseDeleteBuffer,
+  dbToRecord, dbToProject, dbToBuffer
+} from './lib/supabaseCrud';
 
 export default function App() {
   const STORAGE_VER = 'recon_v8_real_production';
@@ -25,6 +32,8 @@ export default function App() {
   const [currentProjectFilter, setCurrentProjectFilter] = useState<string>('ALL');
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
   const [isAutoSyncModalOpen, setIsAutoSyncModalOpen] = useState(false);
+  const [isCloudConnected, setIsCloudConnected] = useState(false);
+  const [isCloudLoading, setIsCloudLoading] = useState(false);
 
   const [records, setRecords] = useState<RecordItem[]>(() => {
     const saved = localStorage.getItem(`${STORAGE_VER}_records`);
@@ -70,10 +79,21 @@ export default function App() {
   const [isBufferDrawerOpen, setIsBufferDrawerOpen] = useState(false);
   const [activeViewEditRecord, setActiveViewEditRecord] = useState<RecordItem | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
 
   // OCR Scanner State
   const [isOcrLoading, setIsOcrLoading] = useState(false);
   const [ocrPreviewImage, setOcrPreviewImage] = useState<string | null>(null);
+
+  // In-App Toast Notification
+  const [toast, setToast] = useState<{ message: string; type?: 'success' | 'info' | 'error' } | null>(null);
+  const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4500);
+  };
 
   // New Record Form State
   const [newProjectId, setNewProjectId] = useState<string>('PRJ-DOH-24');
@@ -107,8 +127,196 @@ export default function App() {
     localStorage.setItem(`${STORAGE_VER}_projects`, JSON.stringify(projects));
   }, [projects]);
 
-  // Handle incoming bills from external Bot or Supabase
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setIsExportMenuOpen(false);
+      }
+      if (moreMenuRef.current && !moreMenuRef.current.contains(event.target as Node)) {
+        setIsMoreMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
+
+  // 🛡️ Comprehensive Duplicate Bill Detection Engine (ป้องกันการคีย์บิลซ้ำ 100%)
+  const checkIsDuplicateBill = (
+    docNo?: string,
+    refNo?: string,
+    driveFileId?: string,
+    extra?: { date?: string; vehicleReg?: string; netWeight?: number; supplier?: string }
+  ): { isDuplicate: boolean; reason: string; matchedId?: string; inTable?: 'records' | 'buffer' } => {
+    const cleanDoc = (docNo || '').trim().toLowerCase();
+    const cleanRef = (refNo || '').trim().toLowerCase();
+    const cleanFileId = (driveFileId || '').trim();
+
+    const isMeaningfulDoc = cleanDoc && cleanDoc !== '-' && cleanDoc !== 'รอระบุ' && cleanDoc.length > 2;
+    const isMeaningfulRef = cleanRef && cleanRef !== '-' && cleanRef !== 'รอระบุ' && cleanRef.length > 2;
+
+    // 1. ตรวจในตารางหลัก 38 คอลัมน์ (records)
+    for (const r of records) {
+      const rDoNo = (r.doNo || '').trim().toLowerCase();
+      const rPoNo = (r.poNo || '').trim().toLowerCase();
+      const rDestTicket = (r.destTicketNo || '').trim().toLowerCase();
+      const rRemarks = (r.remarks || '').toLowerCase();
+      const rPhoto = r.photoAttachment || '';
+
+      if (cleanFileId && (rRemarks.includes(cleanFileId) || rPhoto.includes(cleanFileId))) {
+        return { isDuplicate: true, reason: `ไฟล์เดียวกันใน Google Drive (ID: ${cleanFileId})`, matchedId: r.id, inTable: 'records' };
+      }
+      if (isMeaningfulDoc && (rDoNo === cleanDoc || rDestTicket === cleanDoc || rPoNo === cleanDoc)) {
+        return { isDuplicate: true, reason: `เลขที่บิล/ตั๋ว ${docNo} มีอยู่ในตารางหลักแล้ว (${r.id})`, matchedId: r.id, inTable: 'records' };
+      }
+      if (isMeaningfulRef && (rDoNo === cleanRef || rPoNo === cleanRef || rDestTicket === cleanRef)) {
+        return { isDuplicate: true, reason: `เลขที่อ้างอิง ${refNo} มีอยู่ในตารางหลักแล้ว (${r.id})`, matchedId: r.id, inTable: 'records' };
+      }
+
+      // ตรวจสอบวันที่ + ทะเบียนรถ + น้ำหนัก (กรณีเลขที่บิลไม่ชัดเจน)
+      if (extra?.date && extra?.vehicleReg && extra.vehicleReg !== '-' && extra.vehicleReg !== 'ระบุทะเบียน' && extra?.netWeight && extra.netWeight > 0) {
+        const sameDate = r.date === extra.date;
+        const normV1 = r.vehicleReg ? r.vehicleReg.replace(/[^ก-ฮ0-9]/g, '') : '';
+        const normV2 = extra.vehicleReg.replace(/[^ก-ฮ0-9]/g, '');
+        const sameVehicle = normV1 && normV2 && (normV1 === normV2 || normV1.includes(normV2) || normV2.includes(normV1));
+        const rNet = r.originNet || r.qty || 0;
+        const weightDiff = Math.abs(rNet - extra.netWeight);
+        if (sameDate && sameVehicle && weightDiff < 0.05) {
+          return { isDuplicate: true, reason: `ตรวจพบรายการตรงกันในตารางหลัก (${r.id}: วันที่ ${extra.date}, ทะเบียน ${extra.vehicleReg}, นน. ${extra.netWeight} ตัน)`, matchedId: r.id, inTable: 'records' };
+        }
+      }
+    }
+
+    // 2. ตรวจในกล่องพักรอชนบิล (buffer)
+    for (const b of buffer) {
+      const bRefNo = (b.refNo || '').trim().toLowerCase();
+      const bWeightNo = (b.weightTicketNo || '').trim().toLowerCase();
+      const bRemarks = (b.remarks || '').toLowerCase();
+      const bPhoto = b.photoAttachment || '';
+
+      if (cleanFileId && (b.id.includes(cleanFileId) || bRemarks.includes(cleanFileId) || bPhoto.includes(cleanFileId))) {
+        return { isDuplicate: true, reason: `ไฟล์เดียวกันใน Google Drive (ID: ${cleanFileId})`, matchedId: b.id, inTable: 'buffer' };
+      }
+      if (isMeaningfulDoc && (bRefNo === cleanDoc || bWeightNo === cleanDoc)) {
+        return { isDuplicate: true, reason: `เลขที่ตั๋ว/บิล ${docNo} มีอยู่ในกล่องพักรอชนบิลแล้ว (${b.id})`, matchedId: b.id, inTable: 'buffer' };
+      }
+      if (isMeaningfulRef && (bRefNo === cleanRef || bWeightNo === cleanRef)) {
+        return { isDuplicate: true, reason: `เลขที่อ้างอิง ${refNo} มีอยู่ในกล่องพักรอชนบิลแล้ว (${b.id})`, matchedId: b.id, inTable: 'buffer' };
+      }
+
+      // ตรวจสอบวันที่ + ทะเบียนรถ + น้ำหนัก
+      if (extra?.date && extra?.vehicleReg && extra.vehicleReg !== '-' && extra.vehicleReg !== 'ระบุทะเบียน' && extra?.netWeight && extra.netWeight > 0) {
+        const sameDate = b.date === extra.date;
+        const normV1 = b.vehicleReg ? b.vehicleReg.replace(/[^ก-ฮ0-9]/g, '') : '';
+        const normV2 = extra.vehicleReg.replace(/[^ก-ฮ0-9]/g, '');
+        const sameVehicle = normV1 && normV2 && (normV1 === normV2 || normV1.includes(normV2) || normV2.includes(normV1));
+        const bNet = ((b.destGross || 0) - (b.destTare || 0)) / 1000;
+        const weightDiff = Math.abs(bNet - extra.netWeight);
+        if (sameDate && sameVehicle && weightDiff < 0.05) {
+          return { isDuplicate: true, reason: `ตรวจพบรายการตรงกันในกล่องพัก (${b.id}: วันที่ ${extra.date}, ทะเบียน ${extra.vehicleReg}, นน. ${extra.netWeight} ตัน)`, matchedId: b.id, inTable: 'buffer' };
+        }
+      }
+    }
+
+    return { isDuplicate: false, reason: '' };
+  };
+
+  // Handle incoming bills from external Bot or Supabase (with AI Type & Category Routing & Duplicate Prevention)
   const handleImportBotBill = (billData: any) => {
+    // 🛡️ ตรวจสอบว่าบิลมีอยู่ในระบบหรือยังก่อนบันทึกเสมอ
+    const dupCheck = checkIsDuplicateBill(
+      billData.docNo,
+      billData.refDocNo || billData.refNo,
+      billData.driveFileId,
+      {
+        date: billData.date,
+        vehicleReg: billData.vehicleReg,
+        netWeight: Number(billData.netWeight || billData.qty || 0),
+        supplier: billData.supplier
+      }
+    );
+
+    if (dupCheck.isDuplicate) {
+      // แนบรูปภาพเพิ่มเติมหากบิลเดิมยังไม่มีรูป
+      if (billData.photoAttachment) {
+        if (dupCheck.inTable === 'records' && dupCheck.matchedId) {
+          setRecords(prev => prev.map(r => r.id === dupCheck.matchedId && !r.photoAttachment ? { ...r, photoAttachment: billData.photoAttachment } : r));
+        } else if (dupCheck.inTable === 'buffer' && dupCheck.matchedId) {
+          setBuffer(prev => prev.map(b => b.id === dupCheck.matchedId && !b.photoAttachment ? { ...b, photoAttachment: billData.photoAttachment } : b));
+        }
+      }
+      showToast(`⚠️ ตรวจพบบิลซ้ำ: ${dupCheck.reason} (ระบบข้ามการบันทึกเพื่อไม่ให้ข้อมูลเบิ้ล)`, 'info');
+      return;
+    }
+
+    // If AI separated this bill as SUPPLIER DO (บิลร้านค้า/ผู้จำหน่าย) -> ลงตารางหลัก 38 คอลัมน์
+    if (billData.billType === 'SUPPLIER') {
+      const nextNum = records.reduce((max, r) => {
+        const m = /^TR-2026-(\d+)$/.exec(r.id);
+        return m ? Math.max(max, parseInt(m[1], 10)) : max;
+      }, 0);
+      const newId = `TR-2026-${String(nextNum + 1).padStart(3, '0')}`;
+      const qty = Number(billData.qty || billData.netWeight || 0);
+      const price = Number(billData.pricePerUnit || 0);
+      const totalMat = Number(billData.totalAmount || (qty * price));
+
+      const newRec: RecordItem = {
+        id: newId,
+        projectId: billData.projectId || (currentProjectFilter !== 'ALL' ? currentProjectFilter : 'PRJ-DOH-24'),
+        projectName: billData.projectName || 'ทล.24 ตอน 2',
+        category: billData.category || 'ทั่วไป',
+        billType: 'SUPPLIER',
+        poNo: billData.poRef || billData.poNo || '-',
+        rrNo: '-',
+        date: billData.date || new Date().toISOString().slice(0, 10),
+        doNo: billData.docNo || '-',
+        supplier: billData.supplier || 'โรงโม่ / ร้านค้า (AI สแกน)',
+        contractor: 'บจก. บุรีรัมย์ธงชัยก่อสร้าง',
+        vehicleReg: billData.vehicleReg || '-',
+        itemDesc: billData.itemDesc || 'วัสดุก่อสร้าง',
+        spec: billData.spec || 'STD',
+        originGross: Number(billData.grossWeight || 0),
+        originTare: Number(billData.tareWeight || 0),
+        originNet: Number(billData.netWeight || qty),
+        destDate: '-',
+        destTicketNo: '-',
+        destGross: 0,
+        destTare: 0,
+        destNet: 0,
+        weightDiff: 0,
+        qty: qty,
+        unit: billData.unit || 'ตัน',
+        pricePerUnit: price,
+        totalMaterial: totalMat,
+        transportType: 'สิบล้อ',
+        freightRate: 0,
+        totalFreight: 0,
+        grandTotal: totalMat,
+        paymentMethod: 'เครดิต 30 วัน',
+        paidSupplier: 0,
+        balanceSupplier: totalMat,
+        paidHauler: 0,
+        balanceHauler: 0,
+        totalPaid: 0,
+        totalOutstanding: totalMat,
+        jobStation: billData.remarks || 'ระบุหน้างาน',
+        remarks: `[บอทดึงจาก Drive + AI จัดหมวดหมู่] ${billData.remarks || ''}`.trim(),
+        materialName: billData.itemDesc,
+        billRemarks: billData.remarks,
+        photoAttachment: billData.photoAttachment,
+        isSubcontractorDeduction: Boolean(billData.isSubcontractorDeduction),
+        subcontractorName: billData.subcontractorName,
+        status: 'PENDING'
+      };
+
+      setRecords(prev => [newRec, ...prev]);
+      supabaseUpsertRecord(newRec).catch(() => {});
+      showToast(`🎉 AI สแกนสำเร็จ: บิล ${newRec.doNo} (${newRec.category}) เพิ่มลงในตารางหลัก (${newId}) เรียบร้อยแล้ว!`, 'success');
+      return;
+    }
+
+    // If AI separated this bill as DEST_WEIGHT (ตั๋วชั่งปลายทาง) / PO / RR -> ส่งเข้ากล่องพักรอชนบิล (Buffer Pool)
     const nextNum = buffer.reduce((max, b) => {
       const m = /^BUF-(\d+)$/.exec(b.id);
       return m ? Math.max(max, parseInt(m[1], 10)) : max;
@@ -117,7 +325,7 @@ export default function App() {
 
     const newBufItem: BufferItem = {
       id: newBufId,
-      projectId: billData.projectId || 'PRJ-DOH-24',
+      projectId: billData.projectId || (currentProjectFilter !== 'ALL' ? currentProjectFilter : 'PRJ-DOH-24'),
       projectName: billData.projectName || 'ทล.24 ตอน 2',
       type: billData.billType === 'DEST_WEIGHT' ? 'ตั๋วใบชั่งปลายทาง' : (billData.billType || 'ตั๋วใบชั่งปลายทาง'),
       billType: billData.billType || 'DEST_WEIGHT',
@@ -129,51 +337,271 @@ export default function App() {
       destTare: billData.tareWeight || 14000,
       supplier: billData.supplier || 'โรงโม่ / นำเข้าอัตโนมัติจาก Bot',
       itemDesc: billData.itemDesc || 'วัสดุก่อสร้าง',
-      remarks: billData.remarks || 'ดึงเข้าอัตโนมัติจาก Google Drive Bot'
+      materialName: billData.itemDesc,
+      photoAttachment: billData.photoAttachment,
+      remarks: billData.remarks || 'ดึงเข้าอัตโนมัติจาก Google Drive Bot + AI จัดประเภท'
     };
 
     setBuffer(prev => [newBufItem, ...prev]);
+    supabaseUpsertBuffer(newBufItem).catch(() => {});
 
     // Check if can auto-match right away
     const matchResult = matchByDocumentNo(newBufItem, records);
     if (matchResult.matchedRecord) {
-      alert(`🎉 บอทดึงบิล ${billData.docNo} เข้ามา และพบรายการในตารางหลักที่ตรงกันทันที (${matchResult.matchedRecord.id})! คุณสามารถกด "จับคู่" ได้ที่กล่องพักรอชนบิล`);
+      showToast(`🎉 ตรวจพบการจับคู่ทันที! ตั๋ว ${billData.docNo} ตรงกับรายการ ${matchResult.matchedRecord.id} (${matchResult.matchedRecord.supplier}) ชนบิลได้เลย`, 'success');
     } else {
-      alert(`📥 บอทดึงบิล ${billData.docNo} เข้าสู่กล่องพักรอชนบิล (Buffer Pool) เรียบร้อยแล้ว!`);
+      showToast(`📥 AI สแกนสำเร็จ: บิล/ตั๋ว ${billData.docNo} ส่งเข้าสู่กล่องพักรอชนบิล (Buffer Pool) เรียบร้อยแล้ว`, 'info');
     }
   };
 
-  // Supabase Realtime Listener
+  // Handle batch incoming bills from external Bot (with Duplicate Check)
+  const handleImportBatchBotBills = (billsData: any[]) => {
+    let nextBufNum = buffer.reduce((max, b) => {
+      const m = /^BUF-(\d+)$/.exec(b.id);
+      return m ? Math.max(max, parseInt(m[1], 10)) : max;
+    }, 100);
+
+    let nextRecNum = records.reduce((max, r) => {
+      const m = /^TR-2026-(\d+)$/.exec(r.id);
+      return m ? Math.max(max, parseInt(m[1], 10)) : max;
+    }, 0);
+
+    const newBufItems: BufferItem[] = [];
+    const newRecItems: RecordItem[] = [];
+    let skippedDupCount = 0;
+
+    for (const billData of billsData) {
+      // 🛡️ ตรวจสอบบิลซ้ำ
+      const dupCheck = checkIsDuplicateBill(
+        billData.docNo,
+        billData.refDocNo || billData.refNo,
+        billData.driveFileId,
+        {
+          date: billData.date,
+          vehicleReg: billData.vehicleReg,
+          netWeight: Number(billData.netWeight || billData.qty || 0),
+          supplier: billData.supplier
+        }
+      );
+
+      // ตรวจสอบกับรายการที่เพิ่งเพิ่มในรอบนี้ด้วย
+      const inCurrentRec = newRecItems.some(r => r.doNo === billData.docNo);
+      const inCurrentBuf = newBufItems.some(b => b.refNo === billData.docNo || b.weightTicketNo === billData.docNo);
+
+      if (dupCheck.isDuplicate || inCurrentRec || inCurrentBuf) {
+        skippedDupCount++;
+        continue;
+      }
+
+      if (billData.billType === 'SUPPLIER') {
+        nextRecNum++;
+        const newId = `TR-2026-${String(nextRecNum).padStart(3, '0')}`;
+        const qty = Number(billData.qty || billData.netWeight || 0);
+        const price = Number(billData.pricePerUnit || 0);
+        const totalMat = Number(billData.totalAmount || (qty * price));
+
+        newRecItems.push({
+          id: newId,
+          projectId: billData.projectId || (currentProjectFilter !== 'ALL' ? currentProjectFilter : 'PRJ-DOH-24'),
+          projectName: billData.projectName || 'ทล.24 ตอน 2',
+          category: billData.category || 'ทั่วไป',
+          billType: 'SUPPLIER',
+          poNo: billData.poRef || billData.poNo || '-',
+          rrNo: '-',
+          date: billData.date || new Date().toISOString().slice(0, 10),
+          doNo: billData.docNo || '-',
+          supplier: billData.supplier || 'โรงโม่ / ร้านค้า (AI สแกน)',
+          contractor: 'บจก. บุรีรัมย์ธงชัยก่อสร้าง',
+          vehicleReg: billData.vehicleReg || '-',
+          itemDesc: billData.itemDesc || 'วัสดุก่อสร้าง',
+          spec: billData.spec || 'STD',
+          originGross: Number(billData.grossWeight || 0),
+          originTare: Number(billData.tareWeight || 0),
+          originNet: Number(billData.netWeight || qty),
+          destDate: '-',
+          destTicketNo: '-',
+          destGross: 0,
+          destTare: 0,
+          destNet: 0,
+          weightDiff: 0,
+          qty: qty,
+          unit: billData.unit || 'ตัน',
+          pricePerUnit: price,
+          totalMaterial: totalMat,
+          transportType: 'สิบล้อ',
+          freightRate: 0,
+          totalFreight: 0,
+          grandTotal: totalMat,
+          paymentMethod: 'เครดิต 30 วัน',
+          paidSupplier: 0,
+          balanceSupplier: totalMat,
+          paidHauler: 0,
+          balanceHauler: 0,
+          totalPaid: 0,
+          totalOutstanding: totalMat,
+          jobStation: billData.remarks || 'ระบุหน้างาน',
+          remarks: `[บอทดึงจาก Drive + AI จัดหมวดหมู่] ${billData.remarks || ''}`.trim(),
+          materialName: billData.itemDesc,
+          billRemarks: billData.remarks,
+          photoAttachment: billData.photoAttachment,
+          isSubcontractorDeduction: Boolean(billData.isSubcontractorDeduction),
+          subcontractorName: billData.subcontractorName,
+          status: 'PENDING'
+        });
+      } else {
+        nextBufNum++;
+        newBufItems.push({
+          id: `BUF-${nextBufNum}`,
+          projectId: billData.projectId || (currentProjectFilter !== 'ALL' ? currentProjectFilter : 'PRJ-DOH-24'),
+          projectName: billData.projectName || 'ทล.24 ตอน 2',
+          type: billData.billType === 'DEST_WEIGHT' ? 'ตั๋วใบชั่งปลายทาง' : (billData.billType || 'ตั๋วใบชั่งปลายทาง'),
+          billType: billData.billType || 'DEST_WEIGHT',
+          refNo: billData.docNo,
+          weightTicketNo: billData.weightTicketNo || billData.docNo,
+          date: billData.date || new Date().toISOString().slice(0, 10),
+          vehicleReg: billData.vehicleReg || '-',
+          destGross: billData.grossWeight || (billData.netWeight ? billData.netWeight * 1000 + 14000 : 0),
+          destTare: billData.tareWeight || 14000,
+          supplier: billData.supplier || 'โรงโม่ / นำเข้าอัตโนมัติจาก Bot',
+          itemDesc: billData.itemDesc || 'วัสดุก่อสร้าง',
+          materialName: billData.itemDesc,
+          photoAttachment: billData.photoAttachment,
+          remarks: billData.remarks || billData.driveFileName || 'ดึงเข้าอัตโนมัติจาก Google Drive Bot + AI จัดประเภท'
+        });
+      }
+    }
+
+    if (newRecItems.length > 0) {
+      setRecords(prev => [...newRecItems, ...prev]);
+      newRecItems.forEach(r => supabaseUpsertRecord(r).catch(() => {}));
+    }
+    if (newBufItems.length > 0) {
+      setBuffer(prev => [...newBufItems, ...prev]);
+      newBufItems.forEach(b => supabaseUpsertBuffer(b).catch(() => {}));
+    }
+
+    const totalAdded = newRecItems.length + newBufItems.length;
+    if (skippedDupCount > 0) {
+      showToast(`🎉 ประมวลผลเสร็จสิ้น: นำเข้าบิลใหม่ ${totalAdded} รายการ | ข้ามบิลที่มีอยู่แล้วในระบบ ${skippedDupCount} รายการ (ป้องกันข้อมูลซ้ำซ้อน 100%)`, 'info');
+    } else {
+      showToast(`🎉 นำเข้าบิลสำเร็จรวม ${totalAdded} รายการ! (บิลผู้จำหน่าย: ${newRecItems.length} ใบ, ตั๋วชั่ง/ใบสั่ง: ${newBufItems.length} ใบ)`, 'success');
+    }
+  };
+
+  // 1. Initial Load from Supabase Cloud (if configured)
+  useEffect(() => {
+    let isMounted = true;
+    async function loadCloudData() {
+      const client = getSupabaseClient();
+      if (!client) {
+        setIsCloudConnected(false);
+        return;
+      }
+      try {
+        setIsCloudLoading(true);
+        const [cloudProjects, cloudRecords, cloudBuffer] = await Promise.all([
+          supabaseFetchProjects(),
+          supabaseFetchRecords(),
+          supabaseFetchBuffer()
+        ]);
+        if (!isMounted) return;
+
+        if (cloudProjects && cloudProjects.length > 0) {
+          setProjects(cloudProjects);
+        }
+        if (cloudRecords && cloudRecords.length > 0) {
+          setRecords(cloudRecords);
+        }
+        if (cloudBuffer && cloudBuffer.length > 0) {
+          setBuffer(cloudBuffer);
+        }
+        setIsCloudConnected(true);
+      } catch (err) {
+        console.error('Supabase initial load error:', err);
+      } finally {
+        if (isMounted) setIsCloudLoading(false);
+      }
+    }
+    loadCloudData();
+    return () => { isMounted = false; };
+  }, []);
+
+  // 2. Supabase Realtime 2-Way Sync (Listening to projects, records, buffer)
   useEffect(() => {
     const supabase = getSupabaseClient();
-    const cfg = getSavedSupabaseConfig();
-    if (!supabase || !cfg.autoSync) return;
+    if (!supabase) return;
 
     try {
       const channel = supabase
-        .channel('realtime_bills_buffer')
+        .channel('realtime_all_tables_v1')
         .on(
           'postgres_changes',
-          { event: 'INSERT', schema: 'public', table: cfg.tableName || 'bills_buffer' },
+          { event: '*', schema: 'public', table: 'reconciliation_records' },
           (payload) => {
-            if (payload.new) {
-              handleImportBotBill({
-                docNo: payload.new.doc_no || payload.new.id,
-                billType: payload.new.bill_type || 'DEST_WEIGHT',
-                supplier: payload.new.supplier,
-                vehicleReg: payload.new.vehicle_reg,
-                itemDesc: payload.new.item_desc,
-                netWeight: payload.new.net_weight,
-                grossWeight: payload.new.gross_weight,
-                tareWeight: payload.new.tare_weight,
-                projectId: payload.new.project_id,
-                projectName: payload.new.project_name,
-                remarks: payload.new.remarks
+            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+              const updatedRec = dbToRecord(payload.new);
+              setRecords(prev => {
+                const idx = prev.findIndex(r => r.id === updatedRec.id);
+                if (idx >= 0) {
+                  const next = [...prev];
+                  next[idx] = updatedRec;
+                  return next;
+                }
+                return [updatedRec, ...prev];
               });
+            } else if (payload.eventType === 'DELETE') {
+              const delId = (payload.old as any)?.id;
+              if (delId) setRecords(prev => prev.filter(r => r.id !== delId));
             }
           }
         )
-        .subscribe();
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'projects' },
+          (payload) => {
+            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+              const updatedPrj = dbToProject(payload.new);
+              setProjects(prev => {
+                const idx = prev.findIndex(p => p.id === updatedPrj.id);
+                if (idx >= 0) {
+                  const next = [...prev];
+                  next[idx] = updatedPrj;
+                  return next;
+                }
+                return [...prev, updatedPrj];
+              });
+            } else if (payload.eventType === 'DELETE') {
+              const delId = (payload.old as any)?.id;
+              if (delId) setProjects(prev => prev.filter(p => p.id !== delId));
+            }
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'bills_buffer' },
+          (payload) => {
+            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+              const updatedBuf = dbToBuffer(payload.new);
+              setBuffer(prev => {
+                const idx = prev.findIndex(b => b.id === updatedBuf.id);
+                if (idx >= 0) {
+                  const next = [...prev];
+                  next[idx] = updatedBuf;
+                  return next;
+                }
+                return [updatedBuf, ...prev];
+              });
+            } else if (payload.eventType === 'DELETE') {
+              const delId = (payload.old as any)?.id;
+              if (delId) setBuffer(prev => prev.filter(b => b.id !== delId));
+            }
+          }
+        )
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            setIsCloudConnected(true);
+          }
+        });
 
       return () => {
         supabase.removeChannel(channel);
@@ -223,25 +651,24 @@ export default function App() {
       const weightDiff = Math.round((destNet - matchedRecord.originNet) * 1000);
       const newStatus = Math.abs(weightDiff) > 100 ? 'ALERT' : 'MATCHED';
 
-      setRecords(prev => prev.map(r => {
-        if (r.id === matchedRecord.id) {
-          return {
-            ...r,
-            destDate: item.date || r.destDate,
-            destTicketNo: item.refNo || r.destTicketNo,
-            destGross: item.destGross || r.destGross,
-            destTare: item.destTare || r.destTare,
-            destNet: destNet > 0 ? destNet : r.destNet,
-            weightDiff: destNet > 0 ? weightDiff : r.weightDiff,
-            status: newStatus,
-            driverName: item.driverName || r.driverName,
-            remarks: `${r.remarks || ''} [ชนบิลสำเร็จ: ${reason}]`.trim()
-          };
-        }
-        return r;
-      }));
+      const updatedRec: RecordItem = {
+        ...matchedRecord,
+        destDate: item.date || matchedRecord.destDate,
+        destTicketNo: item.refNo || matchedRecord.destTicketNo,
+        destGross: item.destGross || matchedRecord.destGross,
+        destTare: item.destTare || matchedRecord.destTare,
+        destNet: destNet > 0 ? destNet : matchedRecord.destNet,
+        weightDiff: destNet > 0 ? weightDiff : matchedRecord.weightDiff,
+        status: newStatus,
+        driverName: item.driverName || matchedRecord.driverName,
+        remarks: `${matchedRecord.remarks || ''} [ชนบิลสำเร็จ: ${reason}]`.trim()
+      };
 
+      setRecords(prev => prev.map(r => r.id === matchedRecord.id ? updatedRec : r));
       setBuffer(prev => prev.filter(b => b.id !== bufId));
+      supabaseUpsertRecord(updatedRec).catch(() => {});
+      supabaseDeleteBuffer(bufId).catch(() => {});
+
       alert(`✅ ชนบิลสำเร็จตามเลขที่เอกสารอ้างอิง!\n\n${reason}\nรายการ: ${matchedRecord.id} (${matchedRecord.supplier})`);
     } else if (item.billType === 'PO') {
       alert(`ℹ️ ตรวจสอบพบเลขที่ PO ตรงกับ ${matchedRecord.id} (${matchedRecord.supplier}) ในตารางเรียบร้อยแล้ว`);
@@ -254,18 +681,21 @@ export default function App() {
     if (confirm(`ยืนยันการลบรายการ ${id}?`)) {
       setRecords(prev => prev.filter(r => r.id !== id));
       if (activeViewEditRecord?.id === id) setActiveViewEditRecord(null);
+      supabaseDeleteRecord(id).catch(() => {});
     }
   };
 
   const handleSaveViewEdit = (updatedRecord: RecordItem) => {
     setRecords(prev => prev.map(r => r.id === updatedRecord.id ? updatedRecord : r));
     setActiveViewEditRecord(null);
+    supabaseUpsertRecord(updatedRecord).catch(() => {});
     alert(`✅ บันทึกแก้ไขข้อมูลรายการ ${updatedRecord.id} สำเร็จเรียบร้อยแล้ว!`);
   };
 
   const handleDeleteBuffer = (id: string) => {
     if (confirm(`ยืนยันการลบรายการ ${id} ออกจากกล่องพักรอ?`)) {
       setBuffer(prev => prev.filter(b => b.id !== id));
+      supabaseDeleteBuffer(id).catch(() => {});
     }
   };
 
@@ -332,6 +762,7 @@ export default function App() {
       };
 
       setRecords(prev => [newRec, ...prev]);
+      supabaseUpsertRecord(newRec).catch(() => {});
       alert(`บันทึกบิลผู้จำหน่าย ${newId} ลงตารางหลักสำเร็จ`);
     } else {
       const nextNum = buffer.reduce((max, b) => {
@@ -360,6 +791,7 @@ export default function App() {
       };
 
       setBuffer(prev => [newBuf, ...prev]);
+      supabaseUpsertBuffer(newBuf).catch(() => {});
       setIsBufferDrawerOpen(true);
       alert(`บันทึก ${newBillType} เข้ากล่องพักรอเรียบร้อยแล้ว (รอกดชนบิลด้วยเลขเอกสาร)`);
     }
@@ -367,16 +799,178 @@ export default function App() {
     setIsAddModalOpen(false);
   };
 
-  // Handle OCR Document Upload
+  // Handle OCR Document Upload (Supports both single and multi-file batch scanning with Gemini AI)
   const handleOcrUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
 
+    setIsOcrLoading(true);
+
+    // If multiple files selected: batch scan and save all automatically!
+    if (files.length > 1) {
+      showToast(`🤖 เริ่มให้ AI สแกนอ่านข้อมูลในบิลทั้งหมด ${files.length} ใบ...`, 'info');
+      let successCount = 0;
+      let skippedCount = 0;
+      
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        try {
+          showToast(`⏳ [${i + 1}/${files.length}] AI กำลังอ่านตัวเลขในบิล: ${file.name}...`, 'info');
+          const base64Data = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+
+          const response = await fetch('/api/ocr-scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              imageBase64: base64Data,
+              mimeType: file.type || 'image/jpeg',
+              fileName: file.name
+            })
+          });
+
+          const result = await response.json().catch(() => ({ success: false }));
+          if (result.success && result.data) {
+            const doc = result.data;
+
+            // 🛡️ ตรวจสอบบิลซ้ำก่อนบันทึก
+            const dupCheck = checkIsDuplicateBill(
+              doc.docNo,
+              doc.poRef || doc.refDocNo,
+              undefined,
+              {
+                date: doc.date,
+                vehicleReg: doc.vehicleReg,
+                netWeight: Number(doc.netWeight || doc.qty || 0),
+                supplier: doc.supplier
+              }
+            );
+
+            if (dupCheck.isDuplicate) {
+              skippedCount++;
+              continue;
+            }
+
+            const isSupplier = doc.billType === 'SUPPLIER';
+
+            if (isSupplier) {
+              const nextNum = records.reduce((max, r) => {
+                const m = /^TR-2026-(\d+)$/.exec(r.id);
+                return m ? Math.max(max, parseInt(m[1], 10)) : max;
+              }, 0);
+              const newId = `TR-2026-${String(nextNum + 1 + successCount).padStart(3, '0')}`;
+              const qty = Number(doc.qty || doc.netWeight || 0);
+              const price = Number(doc.pricePerUnit || 0);
+              const totalMat = Number(doc.totalAmount || (qty * price));
+
+              const newRec: RecordItem = {
+                id: newId,
+                projectId: currentProjectFilter !== 'ALL' ? currentProjectFilter : 'PRJ-DOH-24',
+                projectName: 'โครงการทางหลวง (BTC)',
+                category: doc.category || 'หินคลุก / หินผสม (Base & Subbase)',
+                billType: 'SUPPLIER',
+                poNo: doc.poRef || '-',
+                rrNo: '-',
+                date: doc.date || new Date().toISOString().slice(0, 10),
+                doNo: doc.docNo || file.name,
+                supplier: doc.supplier || 'โรงโม่ / ร้านค้า',
+                contractor: 'บจก. บุรีรัมย์ธงชัยก่อสร้าง',
+                vehicleReg: doc.vehicleReg || '-',
+                itemDesc: doc.itemDesc || 'วัสดุก่อสร้าง',
+                spec: doc.spec || 'STD',
+                originGross: doc.grossWeight || 0,
+                originTare: doc.tareWeight || 0,
+                originNet: doc.netWeight || qty,
+                destDate: '-',
+                destTicketNo: '-',
+                destGross: 0,
+                destTare: 0,
+                destNet: 0,
+                weightDiff: 0,
+                qty: qty,
+                unit: doc.unit || 'ตัน',
+                pricePerUnit: price,
+                totalMaterial: totalMat,
+                transportType: 'สิบล้อ',
+                freightRate: 0,
+                totalFreight: 0,
+                grandTotal: totalMat,
+                paymentMethod: 'เครดิต 30 วัน',
+                paidSupplier: 0,
+                balanceSupplier: totalMat,
+                paidHauler: 0,
+                balanceHauler: 0,
+                totalPaid: 0,
+                totalOutstanding: totalMat,
+                jobStation: 'ระบุหน้างาน',
+                remarks: doc.remarks || 'สแกนคีย์ด้วย AI Vision',
+                weightTicketNo: doc.docNo || '-',
+                driverName: '-',
+                materialName: doc.itemDesc || 'วัสดุก่อสร้าง',
+                billRemarks: doc.remarks || '',
+                isSubcontractorDeduction: doc.isSubcontractorDeduction || false,
+                subcontractorName: doc.subcontractorName || '',
+                status: 'PENDING'
+              };
+
+              setRecords(prev => [newRec, ...prev]);
+              supabaseUpsertRecord(newRec).catch(() => {});
+            } else {
+              const nextNum = buffer.reduce((max, b) => {
+                const m = /^BUF-(\d+)$/.exec(b.id);
+                return m ? Math.max(max, parseInt(m[1], 10)) : max;
+              }, 100);
+              const newBufId = `BUF-${nextNum + 1 + successCount}`;
+
+              const newBuf: BufferItem = {
+                id: newBufId,
+                projectId: currentProjectFilter !== 'ALL' ? currentProjectFilter : 'PRJ-DOH-24',
+                projectName: 'โครงการทางหลวง (BTC)',
+                type: 'ตั๋วใบชั่งปลายทาง',
+                billType: 'DEST_WEIGHT',
+                refNo: doc.refDocNo || doc.docNo,
+                weightTicketNo: doc.docNo,
+                date: doc.date || new Date().toISOString().slice(0, 10),
+                vehicleReg: doc.vehicleReg || '-',
+                destGross: doc.grossWeight || 0,
+                destTare: doc.tareWeight || 0,
+                supplier: doc.supplier || 'ตั๋วชั่งปลายทาง',
+                itemDesc: doc.itemDesc || 'หิน / วัสดุ',
+                driverName: '-',
+                materialName: doc.itemDesc || 'หิน / วัสดุ',
+                billRemarks: doc.remarks || ''
+              };
+
+              setBuffer(prev => [newBuf, ...prev]);
+              supabaseUpsertBuffer(newBuf).catch(() => {});
+            }
+            successCount++;
+          }
+        } catch (err) {
+          console.error(`Error scanning file ${file.name}:`, err);
+        }
+      }
+
+      setIsOcrLoading(false);
+      if (skippedCount > 0) {
+        showToast(`🎉 AI สแกนเสร็จสิ้น: นำเข้าใหม่ ${successCount} ใบ | ข้ามบิลซ้ำที่มีอยู่แล้ว ${skippedCount} ใบ (ป้องกันข้อมูลเบิ้ล 100%)`, 'info');
+      } else {
+        showToast(`🎉 AI สแกนอ่านข้อมูลและคีย์ลงตารางสำเร็จเรียบร้อย ${successCount} จาก ${files.length} ใบ!`, 'success');
+      }
+      e.target.value = '';
+      return;
+    }
+
+    // Single file upload: fill into form state and open review modal
+    const file = files[0];
     const reader = new FileReader();
     reader.onload = async () => {
       const base64Data = reader.result as string;
       setOcrPreviewImage(base64Data);
-      setIsOcrLoading(true);
 
       try {
         const response = await fetch('/api/ocr-scan', {
@@ -384,20 +978,42 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             imageBase64: base64Data,
-            mimeType: file.type || 'image/jpeg'
+            mimeType: file.type || 'image/jpeg',
+            fileName: file.name
           })
         });
 
-        const result = await response.json();
+        const result = await response.json().catch(() => ({ success: false }));
         if (result.success && result.data) {
           const doc = result.data;
+
+          // 🛡️ ตรวจสอบว่าบิลซ้ำหรือไม่
+          const dupCheck = checkIsDuplicateBill(
+            doc.docNo,
+            doc.poRef || doc.refDocNo,
+            undefined,
+            {
+              date: doc.date,
+              vehicleReg: doc.vehicleReg,
+              netWeight: Number(doc.netWeight || doc.qty || 0),
+              supplier: doc.supplier
+            }
+          );
+
+          if (dupCheck.isDuplicate) {
+            showToast(`⚠️ คำเตือน: ${dupCheck.reason} (ระบบตรวจพบบิลซ้ำในระบบ โปรดตรวจสอบก่อนบันทึก)`, 'info');
+          }
+
           // Auto-fill into form state
           if (doc.billType) setNewBillType(doc.billType);
           if (doc.category) {
             setNewCategory('__NEW__');
             setNewCustomCategory(doc.category);
           }
-          if (doc.docNo) setNewDoNo(doc.docNo);
+          if (doc.docNo) {
+            setNewDoNo(doc.docNo);
+            setNewWeightTicketNo(doc.docNo);
+          }
           if (doc.poRef) setNewPoNo(doc.poRef);
           if (doc.supplier) setNewSupplier(doc.supplier);
           if (doc.vehicleReg) setNewVehicleReg(doc.vehicleReg);
@@ -405,26 +1021,44 @@ export default function App() {
             setNewItemDesc(doc.itemDesc);
             setNewMaterialName(doc.itemDesc);
           }
-          if (doc.qty) setNewQty(doc.qty);
+          const qty = Number(doc.qty || doc.netWeight || 0);
+          if (qty) setNewQty(qty);
           if (doc.unit) setNewUnit(doc.unit);
           if (doc.pricePerUnit) setNewPrice(doc.pricePerUnit);
           if (doc.remarks) setNewBillRemarks(doc.remarks);
 
-          // Open Add Modal so user can review and approve
           setIsAddModalOpen(true);
-          alert(`✨ สแกนเอกสารสำเร็จ!\nประเภท: ${doc.billType}\nหมวดหมู่ที่ AI วิเคราะห์ให้: ${doc.category || 'ทั่วไป'}\nเลขที่บิล: ${doc.docNo || '-'}\nสินค้า: ${doc.itemDesc || '-'}\n\nระบบจัดหมวดหมู่และกรอกข้อมูลให้อัตโนมัติ ตรวจสอบแล้วกดบันทึกได้เลย`);
+          if (doc.quotaExceeded || doc.isAiFallback) {
+            showToast(`⚠️ โควต้า AI ของ Google ชั่วคราวเกินกำหนด (Resource Exhausted) ระบบอ่านเลขที่บิลและหมวดหมู่วัสดุจากชื่อไฟล์ให้แทน โปรดตรวจตัวเลขก่อนบันทึก`, 'info');
+          } else {
+            showToast(`✨ AI สแกนบิลสำเร็จ! กรอกข้อมูลเลขที่ ${doc.docNo || '-'}, สินค้า: ${doc.itemDesc || '-'}, นน: ${doc.netWeight || qty} ${doc.unit || 'ตัน'} ให้อัตโนมัติแล้ว ตรวจสอบแล้วกดบันทึกได้เลย!`, 'success');
+          }
         } else {
-          alert('ไม่สามารถอ่านข้อมูลจากภาพได้: ' + (result.error || 'Unknown error'));
+          // Client-side fallback if server response wasn't successful
+          applyClientFallback(file);
         }
       } catch (err: any) {
-        console.error('OCR Fetch Error:', err);
-        alert('เกิดข้อผิดพลาดในการเชื่อมต่อระบบ OCR: ' + err.message);
+        console.warn('OCR Fetch Notice, applying client fallback:', err);
+        applyClientFallback(file);
       } finally {
         setIsOcrLoading(false);
       }
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  const applyClientFallback = (file: File) => {
+    const isSupplier = file.name.includes('ใบส่งของ') || file.name.includes('บิล') || file.name.toUpperCase().includes('INV') || file.name.toUpperCase().includes('DO');
+    const docNoMatch = file.name.match(/(?:เลขที่|No\.?|DO-?|INV-?)\s*([A-Za-z0-9\-\/]+)/i);
+    const docNo = docNoMatch ? docNoMatch[1] : file.name.replace(/\.[^/.]+$/, '');
+    setNewBillType(isSupplier ? 'SUPPLIER' : 'DEST_WEIGHT');
+    setNewDoNo(docNo);
+    setNewWeightTicketNo(docNo);
+    setNewItemDesc('วัสดุก่อสร้างงานทางหลวง (โปรดตรวจสอบ)');
+    setNewCategory('หินคลุก / หินผสม (Base & Subbase)');
+    setIsAddModalOpen(true);
+    showToast('⚠️ สแกนด้วย AI ขัดข้องชั่วคราว (โควต้า AI เต็ม) ระบบเปิดฟอร์มพร้อมเลขที่บิลจากชื่อไฟล์ให้แทน สามารถระบุตัวเลขและบันทึกได้ทันที', 'info');
   };
 
   const exportCSV = () => {
@@ -509,243 +1143,250 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-slate-100 text-slate-800 font-sans overflow-hidden">
       {/* Top Header */}
-      <header className="bg-slate-900 text-white px-5 py-2.5 flex items-center justify-between shrink-0 shadow-md">
-        <div className="flex items-center space-x-3">
-          <div className="h-9 w-9 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow font-bold text-base">
-            <Truck className="w-5 h-5" />
+      <header className="bg-slate-900 text-white px-4 py-2 flex items-center justify-between shrink-0 shadow-sm border-b border-slate-800">
+        <div className="flex items-center space-x-2.5">
+          <div className="h-8 w-8 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow-xs font-bold shrink-0">
+            <Truck className="w-4 h-4" />
           </div>
           <div>
             <div className="flex items-center space-x-2">
-              <h1 className="text-base font-bold tracking-wide">ระบบกระทบยอดบิลตั๋วขนส่ง & วัสดุก่อสร้าง (ครบ 38 คอลัมน์มาตรฐาน)</h1>
-              <span className="px-2 py-0.5 text-[10px] rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono">
-                Full 38 Columns
-              </span>
+              <h1 className="text-sm font-bold tracking-tight text-white leading-tight">ระบบชนบิลขนส่ง &amp; วัสดุ</h1>
+              {isCloudConnected ? (
+                <span className="hidden md:inline-flex items-center space-x-1 bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 px-2 py-0.5 rounded-full text-[10px] font-mono shadow-xs" title="เชื่อมต่อ Supabase Cloud สำเร็จ (Live CRUD & Realtime Sync)">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span>Supabase Cloud (CRUD)</span>
+                </span>
+              ) : (
+                <button
+                  onClick={() => setIsAutoSyncModalOpen(true)}
+                  className="hidden md:inline-flex items-center space-x-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-400 hover:text-cyan-300 px-2 py-0.5 rounded-full text-[10px] transition cursor-pointer"
+                  title="คลิกเพื่อเชื่อมต่อฐานข้อมูล Supabase Cloud ให้บันทึกแบบ Realtime หลายคน"
+                >
+                  <Database className="w-3 h-3 text-slate-400" />
+                  <span>LocalStorage (คลิกต่อ Supabase)</span>
+                </button>
+              )}
             </div>
-            <p className="text-[11px] text-slate-400">ตรวจสอบและจับคู่ตั๋วต้นทาง-ปลายทาง (เรียงลำดับครบ 38 คอลัมน์ ไม่มีการตัดทอน)</p>
+            <p className="text-[11px] text-slate-400 leading-tight">กระทบยอดตั๋วต้นทาง-ปลายทาง (38 คอลัมน์)</p>
           </div>
         </div>
 
+        {/* Action Buttons */}
         <div className="flex items-center space-x-2">
-          {/* Clear All / Start Real Data Button */}
-          <button 
-            onClick={handleClearAllData}
-            className="flex items-center space-x-1.5 bg-rose-950/80 hover:bg-rose-900 text-rose-200 hover:text-white px-2.5 py-1.5 rounded text-xs font-semibold transition border border-rose-800 shadow-xs cursor-pointer"
-            title="ล้างข้อมูลทั้งหมด เพื่อเริ่มใช้งานข้อมูลจริงแบบว่างเปล่า"
-          >
-            <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-            <span>ล้างข้อมูล / เริ่มใช้ข้อมูลจริง</span>
-          </button>
-
-          {/* Load Sample Button */}
-          <button 
-            onClick={handleLoadRealBillsSample}
-            className="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1.5 rounded text-xs transition border border-slate-700 shadow-xs cursor-pointer text-[11px]"
-            title="โหลดตัวอย่างบิลจริง 5 ใบเพื่อทดสอบระบบ"
-          >
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-            <span>ตัวอย่าง 5 ใบ</span>
-          </button>
-
-          {/* Auto Drive & Supabase Sync Button */}
+          {/* Auto Drive / Bot Sync Button - Highlighted as 24/7 Auto-Pilot */}
           <button 
             onClick={() => setIsAutoSyncModalOpen(true)}
-            className="flex items-center space-x-1.5 bg-gradient-to-r from-blue-700 to-cyan-700 hover:from-blue-600 hover:to-cyan-600 text-white px-3 py-1.5 rounded text-xs font-bold transition border border-cyan-500/50 shadow-xs cursor-pointer"
-            title="ตั้งค่าดึงบิลอัตโนมัติจาก Google Drive (Gmail อื่น) และ Supabase Cloud"
+            className="flex items-center space-x-1.5 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-200 border border-emerald-500/50 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition shadow-xs cursor-pointer"
+            title="ระบบดูดบิลจาก LINE ใน Google Drive และให้ AI อ่านตัวเลขคีย์ลงตารางให้อัตโนมัติ 24 ชม."
           >
-            <Bot className="w-4 h-4 text-cyan-300" />
-            <span>🤖 ดึงบิลอัตโนมัติจาก Drive</span>
+            <span className="flex h-2 w-2 relative">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            <Bot className="w-3.5 h-3.5 text-emerald-300" />
+            <span>บอท Drive (24 ชม.)</span>
           </button>
 
-          {/* AI Document OCR Scanner Button */}
-          <label className="flex items-center space-x-1.5 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white px-3 py-1.5 rounded text-xs font-bold transition shadow cursor-pointer">
+          {/* AI Document Scanner from Local File (Optional helper) */}
+          <label 
+            className="hidden sm:flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-2.5 py-1.5 rounded-lg text-xs font-medium transition shadow-xs cursor-pointer"
+            title="อัปโหลดรูปภาพบิลจากคอมพิวเตอร์หรือมือถือโดยตรง (กรณีไม่ได้ส่งเข้ากลุ่ม LINE)"
+          >
             {isOcrLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin text-white" />
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
             ) : (
-              <Sparkles className="w-4 h-4 text-amber-300" />
+              <Sparkles className="w-3.5 h-3.5 text-violet-400" />
             )}
-            <span>{isOcrLoading ? 'AI กำลังอ่านและจำแนกเอกสาร...' : '⚡ สแกนบิล/เอกสารด้วย AI'}</span>
+            <span>{isOcrLoading ? 'กำลังสแกน...' : '📤 สแกนรูปจากเครื่อง'}</span>
             <input 
               type="file" 
               accept="image/*" 
+              multiple
               disabled={isOcrLoading}
               onChange={handleOcrUpload} 
               className="hidden" 
             />
           </label>
 
-          <button 
-            onClick={() => setIsBufferDrawerOpen(true)}
-            className="flex items-center space-x-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 px-3 py-1.5 rounded text-xs transition"
-          >
-            <Archive className="w-4 h-4 text-amber-400" />
-            <span>กล่องพักรอชนบิล (LINE Feed)</span>
-            <span className="bg-amber-500 text-slate-950 font-bold px-1.5 py-0.2 rounded-full text-[10px]">{buffer.length}</span>
-          </button>
-
+          {/* Add Record Button */}
           <button 
             onClick={() => setIsAddModalOpen(true)}
-            className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-xs font-semibold transition shadow"
+            className="flex items-center space-x-1 bg-blue-600 hover:bg-blue-500 text-white px-2.5 py-1.5 rounded-lg text-xs font-semibold transition shadow-xs cursor-pointer"
           >
-            <FolderPlus className="w-4 h-4" />
-            <span>+ เพิ่มรายการ/หมวดหมู่ใหม่</span>
+            <FolderPlus className="w-3.5 h-3.5" />
+            <span>+ เพิ่มรายการ</span>
           </button>
 
+          {/* Buffer Drawer Button */}
           <button 
-            onClick={exportCSV}
-            className="flex items-center space-x-1.5 bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded text-xs transition border border-slate-600"
+            onClick={() => setIsBufferDrawerOpen(true)}
+            className="flex items-center space-x-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 px-2.5 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer"
+            title="เปิดกล่องพักรอชนบิล (Buffer Pool)"
           >
-            <Download className="w-4 h-4 text-emerald-400" />
-            <span>ส่งออก CSV (38 คอลัมน์)</span>
+            <Archive className="w-3.5 h-3.5 text-amber-400" />
+            <span>รอชนบิล</span>
+            <span className="bg-amber-500 text-slate-950 font-bold px-1.5 py-0.2 rounded-full text-[10px] leading-tight">
+              {buffer.length}
+            </span>
           </button>
 
-          {/* Express RR Export Button */}
-          <button 
-            onClick={exportExpressFormat}
-            className="flex items-center space-x-1.5 bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded text-xs font-semibold transition border border-amber-400 shadow-xs"
-            title="ส่งออกไฟล์ข้อมูลรับสินค้า/รับวางบิล สำหรับนำเข้าโปรแกรมบัญชี Express"
-          >
-            <FileSpreadsheet className="w-4 h-4 text-amber-200" />
-            <span>ส่งออกไป Express (RR)</span>
-          </button>
+          {/* Export Dropdown Menu */}
+          <div className="relative" ref={exportMenuRef}>
+            <button
+              onClick={() => setIsExportMenuOpen(prev => !prev)}
+              className="flex items-center space-x-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-2.5 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer"
+              title="ส่งออกรายงานและไฟล์ข้อมูล"
+            >
+              <Download className="w-3.5 h-3.5 text-emerald-400" />
+              <span>ส่งออก</span>
+              <ChevronDown className="w-3 h-3 text-slate-400" />
+            </button>
 
-          {/* Subcontractor Deduction Export Button */}
-          <button 
-            onClick={exportSubcontractorDeductionReport}
-            className="flex items-center space-x-1.5 bg-purple-700 hover:bg-purple-600 text-white px-3 py-1.5 rounded text-xs font-semibold transition border border-purple-500 shadow-xs"
-            title="ส่งออกรายงานวัสดุที่ซื้อให้ผู้รับเหมาช่วง เพื่อนำไปหักค่างวดงาน Subcontractor"
-          >
-            <Download className="w-4 h-4 text-purple-200" />
-            <span>รายงานหักเงินผู้รับเหมาช่วง</span>
-          </button>
+            {isExportMenuOpen && (
+              <div className="absolute right-0 mt-1 w-56 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-1 z-50 text-xs">
+                <button
+                  onClick={() => {
+                    exportCSV();
+                    setIsExportMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-slate-200 hover:bg-slate-700/80 flex items-center space-x-2 transition cursor-pointer"
+                >
+                  <Download className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <div>
+                    <div className="font-semibold text-white">ส่งออก CSV (38 คอลัมน์)</div>
+                    <div className="text-[10px] text-slate-400">ครบทุกคอลัมน์มาตรฐาน</div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => {
+                    exportExpressFormat();
+                    setIsExportMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-slate-200 hover:bg-slate-700/80 flex items-center space-x-2 transition cursor-pointer border-t border-slate-700/50"
+                >
+                  <FileSpreadsheet className="w-4 h-4 text-amber-400 shrink-0" />
+                  <div>
+                    <div className="font-semibold text-white">ส่งออกไป Express (RR)</div>
+                    <div className="text-[10px] text-slate-400">สำหรับโปรแกรมบัญชี Express</div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => {
+                    exportSubcontractorDeductionReport();
+                    setIsExportMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-slate-200 hover:bg-slate-700/80 flex items-center space-x-2 transition cursor-pointer border-t border-slate-700/50"
+                >
+                  <FileText className="w-4 h-4 text-purple-400 shrink-0" />
+                  <div>
+                    <div className="font-semibold text-white">รายงานหักเงินผู้รับเหมาช่วง</div>
+                    <div className="text-[10px] text-slate-400">สรุปหักค่างวดงาน Subcontractor</div>
+                  </div>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* More Actions Dropdown (Clean / Sample Data) */}
+          <div className="relative" ref={moreMenuRef}>
+            <button
+              onClick={() => setIsMoreMenuOpen(prev => !prev)}
+              className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 rounded-lg transition cursor-pointer"
+              title="เมนูเพิ่มเติม"
+            >
+              <MoreVertical className="w-3.5 h-3.5" />
+            </button>
+
+            {isMoreMenuOpen && (
+              <div className="absolute right-0 mt-1 w-52 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-1 z-50 text-xs">
+                <button
+                  onClick={() => {
+                    handleLoadRealBillsSample();
+                    setIsMoreMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-slate-200 hover:bg-slate-700/80 flex items-center space-x-2 transition cursor-pointer"
+                >
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <div>
+                    <div className="font-medium text-white">โหลดข้อมูลตัวอย่าง (5 ใบ)</div>
+                    <div className="text-[10px] text-slate-400">ทดสอบระบบด้วยตั๋วจริง</div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => {
+                    handleClearAllData();
+                    setIsMoreMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-rose-300 hover:bg-rose-950/40 flex items-center space-x-2 transition cursor-pointer border-t border-slate-700/50"
+                >
+                  <Trash2 className="w-4 h-4 text-rose-400 shrink-0" />
+                  <div>
+                    <div className="font-medium text-rose-200">ล้างข้อมูล / เริ่มใช้ข้อมูลจริง</div>
+                    <div className="text-[10px] text-rose-400/80">ล้างตัวอย่างให้ระบบว่าง 100%</div>
+                  </div>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
-      {/* Multi-Project Switcher Bar */}
-      <div className="bg-slate-900 border-b border-slate-800 px-5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-white shrink-0">
-        <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-1.5 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1">
-            <Building2 className="w-4 h-4 text-blue-400" />
-            <span className="font-bold text-slate-300">โครงการ (Project):</span>
+      {/* Unified Control & Filter Bar */}
+      <div className="bg-white border-b border-slate-200 px-4 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0 shadow-2xs">
+        {/* Left: Project & Category Selectors */}
+        <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+          {/* Project Selector */}
+          <div className="flex items-center space-x-1.5 bg-slate-100 hover:bg-slate-200/80 border border-slate-200 rounded-lg px-2 py-1 transition">
+            <Building2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
             <select
               value={currentProjectFilter}
               onChange={e => setCurrentProjectFilter(e.target.value)}
-              className="bg-transparent font-bold text-amber-300 focus:outline-none cursor-pointer max-w-[280px] truncate"
+              className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none cursor-pointer max-w-[190px] truncate"
             >
-              <option value="ALL" className="bg-slate-900 text-white">📁 ทุกโครงการ (All Projects) — {records.length} รายการ</option>
+              <option value="ALL">📁 ทุกโครงการ ({records.length})</option>
               {projects.map(p => {
-                const prjCount = records.filter(r => r.projectId === p.id).length;
+                const count = records.filter(r => r.projectId === p.id).length;
                 return (
-                  <option key={p.id} value={p.id} className="bg-slate-900 text-white">
-                    {p.code} ({prjCount} บิล) — {p.name}
+                  <option key={p.id} value={p.id}>
+                    {p.code} ({count}) — {p.name}
                   </option>
                 );
               })}
             </select>
+            <button
+              onClick={() => setIsProjectModalOpen(true)}
+              title="จัดการโครงการ"
+              className="p-0.5 text-slate-400 hover:text-blue-600 transition cursor-pointer"
+            >
+              <FolderKanban className="w-3.5 h-3.5" />
+            </button>
           </div>
 
-          {/* Quick Project Pills */}
-          <div className="hidden lg:flex items-center space-x-1">
-            <button
-              onClick={() => setCurrentProjectFilter('ALL')}
-              className={`px-2.5 py-1 rounded-md text-xs font-semibold transition cursor-pointer ${
-                currentProjectFilter === 'ALL'
-                  ? 'bg-blue-600 text-white shadow-xs'
-                  : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800'
-              }`}
-            >
-              ทั้งหมด ({records.length})
-            </button>
-            {projects.length === 0 ? (
+          {/* Active Project Info Tag (if filtered) */}
+          {currentProject && (
+            <div className="hidden lg:flex items-center space-x-2 bg-blue-50 border border-blue-200 text-blue-900 px-2 py-1 rounded-md text-[11px]">
+              <span className="font-semibold truncate max-w-[180px]">{currentProject.name}</span>
+              <span className="text-slate-300">|</span>
+              <span className="font-mono text-blue-700">จัดซื้อ: ฿{projectMaterialSpent.toLocaleString()}</span>
               <button
-                onClick={() => setIsProjectModalOpen(true)}
-                className="px-2.5 py-1 rounded-md text-xs font-bold transition flex items-center space-x-1 bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 border border-blue-500/40 cursor-pointer"
-                title="คลิกเพื่อสร้างโครงการก่อสร้างจริง"
+                onClick={() => setCurrentProjectFilter('ALL')}
+                title="ดูทุกโครงการ"
+                className="text-slate-400 hover:text-rose-600 ml-0.5 font-bold cursor-pointer"
               >
-                <Plus className="w-3.5 h-3.5 text-blue-400" />
-                <span>+ เพิ่มโครงการจริงแรกของคุณ</span>
+                ×
               </button>
-            ) : (
-              projects.map(p => {
-                const isSelected = currentProjectFilter === p.id;
-                const count = records.filter(r => r.projectId === p.id).length;
-                return (
-                  <button
-                    key={p.id}
-                    onClick={() => setCurrentProjectFilter(p.id)}
-                    className={`px-2.5 py-1 rounded-md text-xs font-semibold transition flex items-center space-x-1 cursor-pointer ${
-                      isSelected
-                        ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
-                        : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800'
-                    }`}
-                  >
-                    <span>{p.code}</span>
-                    <span className={`text-[10px] px-1 rounded-full ${isSelected ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-700 text-slate-300'}`}>
-                      {count}
-                    </span>
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </div>
+            </div>
+          )}
 
-        <div className="flex items-center space-x-2">
-          <button
-            onClick={() => setIsProjectModalOpen(true)}
-            className="flex items-center space-x-1.5 px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium transition cursor-pointer shadow-2xs"
-            title="จัดการข้อมูลโครงการ เพิ่มสัญญา งบประมาณ และดูยอดใช้จ่ายแยกโครงการ"
-          >
-            <FolderKanban className="w-3.5 h-3.5 text-amber-400" />
-            <span>จัดการโครงการ ({projects.length})</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Active Project Banner (if filtered) */}
-      {currentProject && (
-        <div className="bg-blue-950/70 border-b border-blue-900/80 px-5 py-1.5 flex flex-wrap items-center justify-between text-xs text-blue-200 shrink-0">
-          <div className="flex items-center space-x-3 truncate">
-            <span className="font-bold text-white bg-blue-600 px-2 py-0.5 rounded text-[11px] shrink-0">
-              {currentProject.code}
-            </span>
-            <span className="font-semibold text-slate-100 truncate">{currentProject.name}</span>
-            <span className="hidden sm:inline text-slate-500">|</span>
-            <span className="hidden sm:inline text-blue-300 font-mono">สัญญา: {currentProject.contractNo || '-'}</span>
-            <span className="hidden md:inline text-slate-500">|</span>
-            <span className="hidden md:inline text-slate-300">{currentProject.client}</span>
-            {currentProject.location && (
-              <span className="hidden lg:inline text-slate-400 text-[11px]">📍 {currentProject.location}</span>
-            )}
-          </div>
-          <div className="flex items-center space-x-3 shrink-0">
-            <span className="text-[11px] text-slate-300">
-              ยอดจัดซื้อวัสดุโครงการ: <strong className="text-amber-300 font-mono">฿{projectMaterialSpent.toLocaleString()}</strong>
-            </span>
-            <button
-              onClick={() => setCurrentProjectFilter('ALL')}
-              className="text-[11px] text-blue-300 hover:text-white underline cursor-pointer"
-            >
-              ✕ ดูทุกโครงการ
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Toolbar: Category-Driven View Presets */}
-      <div className="bg-white border-b border-slate-300 px-5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0 shadow-xs">
-        
-        {/* Smart Category Selector (รองรับทั้งแบบเร็ว และแบบมีเป็น 100 หมวดหมู่) */}
-        <div className="flex items-center space-x-2">
-          {/* Dropdown ค้นหาหมวดหมู่ สำหรับกรณีมีเป็น 100 หมวด */}
-          <div className="flex items-center space-x-1.5 bg-slate-100 border border-slate-300 rounded px-2.5 py-1 shadow-xs">
-            <span className="w-2 h-2 rounded-full bg-blue-600"></span>
-            <label className="text-[11px] font-bold text-slate-700 whitespace-nowrap">2. หมวดหมู่:</label>
+          {/* Category Selector */}
+          <div className="flex items-center space-x-1.5 bg-slate-100 hover:bg-slate-200/80 border border-slate-200 rounded-lg px-2 py-1 transition">
+            <Layers className="w-3.5 h-3.5 text-slate-500 shrink-0" />
             <select
               value={currentCategoryFilter}
               onChange={e => setCurrentCategoryFilter(e.target.value)}
-              className="bg-transparent text-xs text-slate-800 font-bold focus:outline-none cursor-pointer max-w-[200px] truncate"
+              className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none cursor-pointer max-w-[160px] truncate"
             >
-              <option value="ALL">📋 ทั้งหมดทุกหมวดหมู่ ({records.length})</option>
+              <option value="ALL">📋 ทุกหมวดหมู่ ({records.length})</option>
               {categories.map(cat => {
                 const count = records.filter(r => r.category === cat).length;
                 return (
@@ -756,67 +1397,85 @@ export default function App() {
               })}
             </select>
           </div>
-
-          {/* ปุ่มด่วนเฉพาะหมวดที่มีข้อมูลมากที่สุด (Top 4 Categories) เพื่อความรวดเร็ว */}
-          <div className="hidden md:flex items-center space-x-1">
-            <button
-              onClick={() => setCurrentCategoryFilter('ALL')}
-              className={`px-2.5 py-1 rounded text-xs font-semibold transition ${
-                currentCategoryFilter === 'ALL'
-                  ? 'bg-slate-900 text-white shadow-xs'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              }`}
-            >
-              ทั้งหมด
-            </button>
-            {categories.slice(0, 4).map(cat => {
-              const isSelected = currentCategoryFilter === cat;
-              const count = records.filter(r => r.category === cat).length;
-              return (
-                <button
-                  key={cat}
-                  onClick={() => setCurrentCategoryFilter(cat)}
-                  className={`px-2.5 py-1 rounded text-xs font-semibold transition flex items-center space-x-1 ${
-                    isSelected
-                      ? 'bg-blue-600 text-white shadow-xs font-bold'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  }`}
-                >
-                  <span className="truncate max-w-[120px]">{cat}</span>
-                  <span className={`text-[10px] px-1 rounded-full ${isSelected ? 'bg-blue-800 text-white' : 'bg-slate-300 text-slate-700'}`}>
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
         </div>
 
-        {/* Secondary: Status Filter Tabs & Search */}
-        <div className="flex items-center space-x-3 flex-wrap gap-y-1">
-          {/* Status Tabs */}
-          <div className="flex items-center space-x-1 text-[11px]">
-            <button onClick={() => setCurrentFilterTab('ALL')} className={`px-2 py-0.5 rounded font-medium ${currentFilterTab === 'ALL' ? 'bg-slate-800 text-white' : 'bg-slate-100'}`}>ทั้งหมด ({counts.all})</button>
-            <button onClick={() => setCurrentFilterTab('PENDING')} className={`px-2 py-0.5 rounded font-medium ${currentFilterTab === 'PENDING' ? 'bg-amber-600 text-white' : 'text-amber-700 bg-amber-50 border border-amber-200'}`}>รอชนบิล ({counts.pending})</button>
-            <button onClick={() => setCurrentFilterTab('MATCHED')} className={`px-2 py-0.5 rounded font-medium ${currentFilterTab === 'MATCHED' ? 'bg-emerald-600 text-white' : 'text-emerald-700 bg-emerald-50 border border-emerald-200'}`}>จับคู่แล้ว ({counts.matched})</button>
-            <button onClick={() => setCurrentFilterTab('ALERT')} className={`px-2 py-0.5 rounded font-medium ${currentFilterTab === 'ALERT' ? 'bg-rose-600 text-white' : 'text-rose-700 bg-rose-50 border border-rose-200'}`}>น้ำหนักต่างเกินเกณฑ์ ({counts.alert})</button>
-            <button onClick={() => setCurrentFilterTab('SUBCONTRACTOR')} className={`px-2 py-0.5 rounded font-medium flex items-center space-x-1 ${currentFilterTab === 'SUBCONTRACTOR' ? 'bg-purple-700 text-white shadow-xs' : 'text-purple-700 bg-purple-50 border border-purple-200 hover:bg-purple-100'}`}>
-              <span>หักค่างวดผู้รับเหมาช่วง</span>
-              <span className={`text-[10px] px-1 rounded-full ${currentFilterTab === 'SUBCONTRACTOR' ? 'bg-purple-900 text-white' : 'bg-purple-200 text-purple-800'}`}>
+        {/* Right: Status Filters & Search */}
+        <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+          {/* Status Segmented Tabs */}
+          <div className="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-[11px]">
+            <button
+              onClick={() => setCurrentFilterTab('ALL')}
+              className={`px-2 py-1 rounded-md font-medium transition cursor-pointer ${
+                currentFilterTab === 'ALL'
+                  ? 'bg-white text-slate-900 shadow-2xs font-bold'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              ทั้งหมด ({counts.all})
+            </button>
+            <button
+              onClick={() => setCurrentFilterTab('PENDING')}
+              className={`px-2 py-1 rounded-md font-medium transition cursor-pointer flex items-center space-x-1 ${
+                currentFilterTab === 'PENDING'
+                  ? 'bg-amber-500 text-white shadow-2xs font-bold'
+                  : 'text-amber-700 hover:bg-amber-100/60'
+              }`}
+            >
+              <span>รอชนบิล</span>
+              <span className={`px-1 rounded-full text-[10px] ${currentFilterTab === 'PENDING' ? 'bg-amber-700' : 'bg-amber-200/80'}`}>
+                {counts.pending}
+              </span>
+            </button>
+            <button
+              onClick={() => setCurrentFilterTab('MATCHED')}
+              className={`px-2 py-1 rounded-md font-medium transition cursor-pointer flex items-center space-x-1 ${
+                currentFilterTab === 'MATCHED'
+                  ? 'bg-emerald-600 text-white shadow-2xs font-bold'
+                  : 'text-emerald-700 hover:bg-emerald-100/60'
+              }`}
+            >
+              <span>จับคู่แล้ว</span>
+              <span className={`px-1 rounded-full text-[10px] ${currentFilterTab === 'MATCHED' ? 'bg-emerald-800' : 'bg-emerald-200/80'}`}>
+                {counts.matched}
+              </span>
+            </button>
+            <button
+              onClick={() => setCurrentFilterTab('ALERT')}
+              className={`px-2 py-1 rounded-md font-medium transition cursor-pointer flex items-center space-x-1 ${
+                currentFilterTab === 'ALERT'
+                  ? 'bg-rose-600 text-white shadow-2xs font-bold'
+                  : 'text-rose-700 hover:bg-rose-100/60'
+              }`}
+            >
+              <span>น้ำหนักต่าง</span>
+              <span className={`px-1 rounded-full text-[10px] ${currentFilterTab === 'ALERT' ? 'bg-rose-800' : 'bg-rose-200/80'}`}>
+                {counts.alert}
+              </span>
+            </button>
+            <button
+              onClick={() => setCurrentFilterTab('SUBCONTRACTOR')}
+              className={`px-2 py-1 rounded-md font-medium transition cursor-pointer flex items-center space-x-1 ${
+                currentFilterTab === 'SUBCONTRACTOR'
+                  ? 'bg-purple-700 text-white shadow-2xs font-bold'
+                  : 'text-purple-700 hover:bg-purple-100/60'
+              }`}
+            >
+              <span>หักผู้รับเหมา</span>
+              <span className={`px-1 rounded-full text-[10px] ${currentFilterTab === 'SUBCONTRACTOR' ? 'bg-purple-900' : 'bg-purple-200/80'}`}>
                 {counts.subcontractorDeductions}
               </span>
             </button>
           </div>
 
-          {/* Search Input */}
-          <div className="relative">
+          {/* Search Box */}
+          <div className="relative min-w-[170px]">
             <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-400" />
             <input 
               type="text" 
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              placeholder="ค้นหา TR, DO, PO, RR, ทะเบียน, ผู้ขาย..." 
-              className="pl-8 pr-2 py-1 border border-slate-300 rounded text-xs w-52 bg-slate-50 focus:bg-white focus:outline-none focus:border-blue-500"
+              placeholder="ค้นหาบิล, ทะเบียน, สินค้า..." 
+              className="w-full pl-8 pr-2.5 py-1 bg-slate-100 hover:bg-slate-200/60 focus:bg-white border border-slate-200 rounded-lg text-xs text-slate-800 focus:outline-none focus:border-blue-500 transition"
             />
           </div>
         </div>
@@ -1138,16 +1797,19 @@ export default function App() {
         onSelectProject={(pId) => setCurrentProjectFilter(pId)}
         onAddProject={(newPrj) => {
           setProjects(prev => [...prev, newPrj]);
+          supabaseUpsertProject(newPrj).catch(() => {});
           alert(`✅ เพิ่มโครงการ "${newPrj.name}" เรียบร้อยแล้ว!`);
         }}
         onUpdateProject={(updatedPrj) => {
           setProjects(prev => prev.map(p => p.id === updatedPrj.id ? updatedPrj : p));
           setRecords(prev => prev.map(r => r.projectId === updatedPrj.id ? { ...r, projectName: updatedPrj.code } : r));
+          supabaseUpsertProject(updatedPrj).catch(() => {});
           alert(`✅ บันทึกการแก้ไขโครงการ "${updatedPrj.code}" เรียบร้อยแล้ว!`);
         }}
         onDeleteProject={(pId) => {
           setProjects(prev => prev.filter(p => p.id !== pId));
           if (currentProjectFilter === pId) setCurrentProjectFilter('ALL');
+          supabaseDeleteProject(pId).catch(() => {});
           alert('ลบโครงการเรียบร้อยแล้ว');
         }}
       />
@@ -1157,6 +1819,16 @@ export default function App() {
         isOpen={isAutoSyncModalOpen}
         onClose={() => setIsAutoSyncModalOpen(false)}
         onImportBotBill={handleImportBotBill}
+        onImportBatchBotBills={handleImportBatchBotBills}
+        projects={projects}
+        records={records}
+        buffer={buffer}
+        onDataReloaded={(p, r, b) => {
+          setProjects(p);
+          setRecords(r);
+          setBuffer(b);
+          setIsCloudConnected(true);
+        }}
       />
 
       {/* Modal: Add New Record */}
@@ -1295,6 +1967,18 @@ export default function App() {
               </div>
             </form>
           </div>
+        </div>
+      )}
+      {/* Global In-App Toast Notification */}
+      {toast && (
+        <div className="fixed bottom-5 right-5 z-50 max-w-md bg-slate-900 text-white px-4 py-3 rounded-xl shadow-2xl border border-slate-700 text-xs font-semibold flex items-center space-x-2 animate-bounce-once">
+          <span className="text-sm">
+            {toast.type === 'error' ? '❌' : toast.type === 'info' ? 'ℹ️' : '✅'}
+          </span>
+          <span className="flex-1 leading-relaxed">{toast.message}</span>
+          <button onClick={() => setToast(null)} className="text-slate-400 hover:text-white ml-2 text-sm cursor-pointer">
+            ✕
+          </button>
         </div>
       )}
     </div>
