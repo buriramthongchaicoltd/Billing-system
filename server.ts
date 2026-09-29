@@ -72,8 +72,11 @@ async function performBillAiExtraction(
     ? `\n\n📌 ข้อมูลโครงสร้างโฟลเดอร์ที่เก็บไฟล์ใน Google Drive (Multi-layer Path):\n- โฟลเดอร์ซ้อนหลายชั้น: "${contextInfo.folderPath}"\n- ชื่อไฟล์ต้นฉบับ: "${contextInfo.fileName || ''}"\n(คำแนะนำ AI: โปรดนำชื่อโฟลเดอร์แต่ละชั้น เช่น ชื่อโครงการ, หมวดวัสดุ, ชื่อผู้จำหน่าย หรือช่างผู้รับเหมาช่วง มาร่วมวิเคราะห์ยืนยันกับภาพจริง เพื่อให้ได้หมวดหมู่และประเภทเอกสารที่ถูกต้องที่สุด)` 
     : '';
 
-  // List of models to try in order (gemini-3.1-flash-lite is fastest and has available quota)
-  const candidateModels = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
+  // 🔒 ล็อกโมเดลเดียวตามนโยบายของระบบ: gemini-3.1-flash-lite
+  // เหตุผล: ป้องกันการอ่านข้อมูล"ไม่เหมือนเดิม"เมื่อมีการเปลี่ยนรุ่นโมเดล
+  // (เดิมลองหลายโมเดล: ถ้าโมเดลหลักโควต้าเต็มชั่วคราว ระบบจะสลับไปโมเดลอื่น → ผลการอ่านอาจเพี้ยนข้ามรุ่น)
+  // หากโมเดลนี้ล้มเหลว → ใช้ fallback จากชื่อไฟล์ + ติดธง needsReview ให้ผู้ใช้ตรวจเอง แทนการเดาด้วยโมเดลอื่น
+  const candidateModels = ['gemini-3.1-flash-lite'];
   
   for (const modelName of candidateModels) {
     try {
@@ -373,7 +376,8 @@ app.post('/api/bot-import-bill', async (req, res) => {
             total_material: parsedData.totalAmount || null,
             photo_attachment: newBotBill.driveFileUrl || null,
             remarks: req.body.driveFolderPath || '',
-            needs_review: false
+            // ธงตรวจสอบ: หากไม่มีรูปส่งเข้ามา = ข้อมูลมาจากชื่อไฟล์/ค่า default (ไม่ได้อ่านใบจริงด้วย AI) → ให้ติดธงรอตรวจสอบเสมอ
+            needs_review: imageBase64 ? Boolean(parsedData.isAiFallback || parsedData.quotaExceeded) : true
           });
 
           // 2. บันทึกประวัติลง drive_sync_logs
@@ -406,6 +410,73 @@ app.post('/api/bot-import-bill', async (req, res) => {
   } catch (err: any) {
     console.error('Error importing bill from bot:', err);
     return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Endpoint: ดึง"รายชื่อไฟล์จริง"จากโฟลเดอร์ Google Drive (โฟลเดอร์ต้องเปิดแชร์ลิงก์ Anyone with the link)
+// ใช้ Drive public embeddedfolderview — ไม่ต้องมี Google API Key (เข้าถึงได้เฉพาะไฟล์/โฟลเดอร์ที่แชร์ลิงก์สาธารณะเท่านั้น)
+// สำรวจ"ทะลุโฟลเดอร์ย่อยทุกชั้น" (BFS + visited set กันวงวน ตรงกับ logic getFilesRecursive ของ GAS)
+app.post('/api/drive-list-files', async (req, res) => {
+  try {
+    const { folderId, limit = 20 } = req.body || {};
+    if (!folderId) {
+      return res.status(400).json({ success: false, error: 'Missing folderId' });
+    }
+
+    const maxFetch = Number(limit || 20);
+    const visited = new Set<string>();
+    const queue: { id: string; path: string; depth: number }[] = [{ id: folderId, path: '', depth: 1 }];
+    const billFiles: { fileId: string; fileName: string; folderPath: string }[] = [];
+    const MAX_FOLDERS = 50;   // กันยิง Drive ถี่เกิน (แต่ละโฟลเดอร์ = 1 request)
+    const MAX_DEPTH = 6;      // กันโครงสร้างลึกผิดปกติ
+    let foldersChecked = 0;
+
+    while (queue.length > 0 && billFiles.length < maxFetch && foldersChecked < MAX_FOLDERS) {
+      const cur = queue.shift()!;
+      if (visited.has(cur.id)) continue;
+      visited.add(cur.id);
+      foldersChecked++;
+
+      const resp = await fetch(
+        `https://drive.google.com/embeddedfolderview?id=${encodeURIComponent(cur.id)}#list`,
+        { headers: { 'User-Agent': 'Mozilla/5.0' }, redirect: 'follow' }
+      );
+      if (!resp.ok) continue;
+      const html = await resp.text();
+
+      // แต่ละ entry: id="entry-<id>" ... ชื่อใน div.flip-entry-title ... ถ้าเป็น"โฟลเดอร์"จะมีลิงก์ /drive/folders/<id>
+      const entryRegex = /id="entry-([A-Za-z0-9_-]+)"([\s\S]*?)<div class="flip-entry-title">([\s\S]*?)<\/div>/g;
+      let m: RegExpExecArray | null;
+      while ((m = entryRegex.exec(html)) !== null) {
+        const entryId = m[1];
+        const entryBlock = m[2];
+        const fileName = m[3]
+          .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
+        const isFolder = entryBlock.includes('/drive/folders/') || !fileName.includes('.');
+
+        if (isFolder) {
+          if (cur.depth < MAX_DEPTH && !visited.has(entryId)) {
+            queue.push({ id: entryId, path: cur.path ? `${cur.path} > ${fileName}` : fileName, depth: cur.depth + 1 });
+          }
+        } else if (/\.(jpe?g|png|webp|heic|pdf)$/i.test(fileName)) {
+          billFiles.push({ fileId: entryId, fileName, folderPath: cur.path });
+          if (billFiles.length >= maxFetch) break;
+        }
+      }
+    }
+
+    if (foldersChecked === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'ไม่สามารถเข้าถึงโฟลเดอร์ Drive — โปรดตรวจว่าโฟลเดอร์เปิดแชร์ลิงก์ "Anyone with the link" แล้ว'
+      });
+    }
+
+    return res.json({ success: true, count: billFiles.length, foldersChecked, files: billFiles });
+  } catch (error: any) {
+    console.error('Drive list files Error:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Failed to list Drive folder' });
   }
 });
 

@@ -1737,11 +1737,17 @@ export default function App() {
               <div className="text-center py-8 text-slate-400">ไม่มีตั๋วค้างในกล่องพักรอ</div>
             ) : (
               buffer.map(b => (
-                <div key={b.id} className="bg-white p-3 rounded border border-slate-200 shadow-xs space-y-1.5">
+                <div key={b.id} className={`bg-white p-3 rounded border shadow-xs space-y-1.5 ${b.needsReview ? 'border-amber-400 bg-amber-50/40' : 'border-slate-200'}`}>
                   <div className="flex justify-between items-center font-bold">
                     <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px]">{b.type}</span>
                     <span className="font-mono text-blue-700 font-bold">{b.refNo}</span>
                   </div>
+                  {b.needsReview && (
+                    <div className="flex items-center space-x-1 text-[10px] font-bold text-amber-800 bg-amber-100 border border-amber-300 rounded px-1.5 py-0.5 w-fit">
+                      <Flag className="w-3 h-3" />
+                      <span>ข้อมูลจากชื่อไฟล์ — ต้องตรวจสอบกับใบจริงก่อนชนบิล</span>
+                    </div>
+                  )}
                   <div className="text-slate-600 text-[11px] space-y-0.5">
                     <div>วันที่: {b.date}</div>
                     {b.vehicleReg && <div>ทะเบียน: <span className="font-bold">{b.vehicleReg}</span></div>}

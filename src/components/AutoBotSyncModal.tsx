@@ -186,192 +186,104 @@ export const AutoBotSyncModal: React.FC<AutoBotSyncModalProps> = ({
     }
   };
 
-  // Real AI Scanner for Drive bills (reads actual printed text and numbers into table)
+  // Real AI Scanner for Drive bills: ดึง"ไฟล์จริง"จากโฟลเดอร์ Google Drive ผ่าน backend
+  // แล้วส่งแต่ละไฟล์เข้า /api/scan-drive-file ให้ Gemini AI อ่านเนื้อหาบนภาพจริง (ไม่ใช้ข้อมูลตัวอย่าง hardcoded อีกต่อไป)
   const handleRunDriveAiScan = async (batchCount: number = 10) => {
     setIsBatchAiScanning(true);
-    showToast(`🤖 เริ่มส่งบิลจากโฟลเดอร์ Google Drive ให้ AI (Gemini Vision) สแกนอ่านเนื้อหาและคีย์ข้อมูล...`, 'info');
+    showToast(`🤖 กำลังดึงรายการไฟล์บิลจริงจากโฟลเดอร์ Google Drive (สูงสุด ${batchCount} ไฟล์)...`, 'info');
 
-    // List of authentic bills in BTC_Purchasing_Receipts
-    const driveSampleBills = [
-      {
-        fileName: 'TR-202609-00568_ใบส่งของ เลขที่ 1264008895_20260928_150435.jpg',
-        docNo: '1264008895',
-        refDocNo: 'TR-202609-00568',
-        billType: 'SUPPLIER',
-        date: '2026-09-28',
-        supplier: 'หจก. ศิลาชัย บุรีรัมย์ (โรงโม่หิน)',
-        vehicleReg: '82-4567 บร',
-        itemDesc: 'หินคลุก 0-32 มม. (Base Course)',
-        category: 'หินคลุก / หินผสม (Base & Subbase)',
-        grossWeight: 42350,
-        tareWeight: 14120,
-        netWeight: 28.23,
-        qty: 28.23,
-        unit: 'ตัน',
-        pricePerUnit: 240,
-        totalAmount: 6775.20,
-        remarks: 'ส่งหน้างาน ทล.24 ตอน 2 กม.45+200 (รับเข้าแล้ว)'
-      },
-      {
-        fileName: 'TR-202609-00569_ใบส่งของ เลขที่ 1264008907_20260928_155855.jpg',
-        docNo: '1264008907',
-        refDocNo: 'TR-202609-00569',
-        billType: 'SUPPLIER',
-        date: '2026-09-28',
-        supplier: 'หจก. ศิลาชัย บุรีรัมย์ (โรงโม่หิน)',
-        vehicleReg: '82-5599 บร',
-        itemDesc: 'หินคลุก 0-32 มม. (Base Course)',
-        category: 'หินคลุก / หินผสม (Base & Subbase)',
-        grossWeight: 44100,
-        tareWeight: 14200,
-        netWeight: 29.90,
-        qty: 29.90,
-        unit: 'ตัน',
-        pricePerUnit: 240,
-        totalAmount: 7176.00,
-        remarks: 'ส่งหน้างาน ทล.24 กม.46+000'
-      },
-      {
-        fileName: 'TR-202609-00570_ใบส่งของ เลขที่ 1264008909_20260928_160844.jpg',
-        docNo: '1264008909',
-        refDocNo: 'TR-202609-00570',
-        billType: 'SUPPLIER',
-        date: '2026-09-28',
-        supplier: 'บจก. สุวรรณภูมิหินอ่อนแอนด์คอนสตรัคชั่น',
-        vehicleReg: '83-1122 บร',
-        itemDesc: 'หิน 1 (3/4 นิ้ว) งานผิวทาง',
-        category: 'หินคลุก / หินผสม (Base & Subbase)',
-        grossWeight: 41800,
-        tareWeight: 13950,
-        netWeight: 27.85,
-        qty: 27.85,
-        unit: 'ตัน',
-        pricePerUnit: 270,
-        totalAmount: 7519.50,
-        remarks: 'ส่งแพลนท์ยางแอสฟัลต์'
-      },
-      {
-        fileName: 'TR-202609-00567_ใบส่งของ เลขที่ 1264008892_20260928_150249.jpg',
-        docNo: '1264008892',
-        refDocNo: 'TR-202609-00567',
-        billType: 'SUPPLIER',
-        date: '2026-09-28',
-        supplier: 'หจก. ศิลาชัย บุรีรัมย์ (โรงโม่หิน)',
-        vehicleReg: '82-7711 บร',
-        itemDesc: 'หินคลุก 0-32 มม.',
-        category: 'หินคลุก / หินผสม (Base & Subbase)',
-        grossWeight: 43500,
-        tareWeight: 14050,
-        netWeight: 29.45,
-        qty: 29.45,
-        unit: 'ตัน',
-        pricePerUnit: 240,
-        totalAmount: 7068.00,
-        remarks: 'ส่งหน้างาน ทล.24'
-      },
-      {
-        fileName: 'TR-202609-00566_ใบส่งของ เลขที่ 1264008888_20260928_150232.jpg',
-        docNo: '1264008888',
-        refDocNo: 'TR-202609-00566',
-        billType: 'DEST_WEIGHT',
-        date: '2026-09-28',
-        supplier: 'บจก. บุรีรัมย์ธงชัยก่อสร้าง (ตาชั่งหน้างาน)',
-        vehicleReg: '82-7711 บร',
-        itemDesc: 'หินคลุก ชั่งหน้างาน',
-        category: 'หินคลุก / หินผสม (Base & Subbase)',
-        grossWeight: 43420,
-        tareWeight: 14050,
-        netWeight: 29.37,
-        qty: 29.37,
-        unit: 'ตัน',
-        pricePerUnit: 0,
-        totalAmount: 0,
-        remarks: 'ตั๋วชั่งปลายทางหน้างาน'
-      },
-      {
-        fileName: 'TR-202609-00565_ใบส่งของ เลขที่ 1264008887_20260928_150046.jpg',
-        docNo: '1264008887',
-        refDocNo: 'TR-202609-00565',
-        billType: 'SUPPLIER',
-        date: '2026-09-28',
-        supplier: 'หจก. ศิลาชัย บุรีรัมย์',
-        vehicleReg: '82-3344 บร',
-        itemDesc: 'หินฝุ่น 0-5 มม. (Stone Dust)',
-        category: 'หินคลุก / หินผสม (Base & Subbase)',
-        grossWeight: 45200,
-        tareWeight: 14300,
-        netWeight: 30.90,
-        qty: 30.90,
-        unit: 'ตัน',
-        pricePerUnit: 210,
-        totalAmount: 6489.00,
-        remarks: 'ส่งรองพื้นทาง'
-      },
-      {
-        fileName: 'TR-202609-00564_ใบส่งของ เลขที่ 02537064_20260928_145943.jpg',
-        docNo: '02537064',
-        refDocNo: 'TR-202609-00564',
-        billType: 'SUPPLIER',
-        date: '2026-09-28',
-        supplier: 'บจก. ทิปโก้แอสฟัลท์ (Tipco)',
-        vehicleReg: '70-9812 บร',
-        itemDesc: 'ยางแอสฟัลต์ซีเมนต์ AC 60/70',
-        category: 'งานผิวทางแอสฟัลต์ (Asphalt Pavement)',
-        grossWeight: 38500,
-        tareWeight: 13500,
-        netWeight: 25.00,
-        qty: 25.00,
-        unit: 'ตัน',
-        pricePerUnit: 24500,
-        totalAmount: 612500.00,
-        remarks: 'ยางมะตอยงาน AC Wearing Course'
-      },
-      {
-        fileName: 'BTC_Receipt_20260928_145833_633761002324492374.jpg',
-        docNo: 'BTC-SCALE-63376',
-        refDocNo: '1264008895',
-        billType: 'DEST_WEIGHT',
-        date: '2026-09-28',
-        supplier: 'ตาชั่งหน้างาน BTC (ทล.24)',
-        vehicleReg: '82-4567 บร',
-        itemDesc: 'หินคลุก ชั่งเข้าหน้างาน',
-        category: 'หินคลุก / หินผสม (Base & Subbase)',
-        grossWeight: 42280,
-        tareWeight: 14120,
-        netWeight: 28.16,
-        qty: 28.16,
-        unit: 'ตัน',
-        pricePerUnit: 0,
-        totalAmount: 0,
-        remarks: 'ตั๋วชั่งปลายทางหน้างาน ทล.24 (ต่างกับต้นทาง -70 กก.)'
-      }
-    ];
-
-    const targetList = driveSampleBills.slice(0, batchCount);
-    const results: any[] = [];
-
-    for (let i = 0; i < targetList.length; i++) {
-      const b = targetList[i];
-      setScanProgress({
-        current: i + 1,
-        total: targetList.length,
-        fileName: b.fileName,
-        billNo: b.docNo,
-        supplier: b.supplier,
-        weight: `${b.netWeight} ตัน (หนัก ${b.grossWeight.toLocaleString()} / เบา ${b.tareWeight.toLocaleString()} กก.)`
+    try {
+      // 1. ขอรายชื่อไฟล์จริงจากโฟลเดอร์ (backend จะไปอ่าน Drive ให้ — หน้าเว็บต้องรันบนเครื่องที่มี server)
+      const listRes = await fetch('/api/drive-list-files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId: folderId, limit: batchCount })
       });
+      const listData = await listRes.json().catch(() => ({ success: false, error: 'เซิร์ฟเวอร์ตอบกลับไม่ถูกต้อง' }));
 
-      // Realistic AI OCR processing delay (500ms)
-      await new Promise(r => setTimeout(r, 600));
+      if (!listRes.ok || !listData.success) {
+        setIsBatchAiScanning(false);
+        setScanProgress(null);
+        showToast(`❌ ดึงรายการไฟล์จาก Drive ไม่สำเร็จ: ${listData.error || ('HTTP ' + listRes.status)} — (ฟีเจอร์นี้ต้องรันบนเซิร์ฟเวอร์ที่มี backend เช่น npm run dev หรือ Render; GitHub Pages ไม่มี /api)`, 'error');
+        return;
+      }
 
-      onImportBotBill(b);
-      results.push(b);
+      const driveFiles: { fileId: string; fileName: string }[] = listData.files || [];
+      if (driveFiles.length === 0) {
+        setIsBatchAiScanning(false);
+        setScanProgress(null);
+        showToast('📭 ไม่พบไฟล์รูปภาพ/PDF ในโฟลเดอร์นี้ (โปรดตรวจว่าโฟลเดอร์เปิดแชร์ลิงก์และมีไฟล์บิลอยู่จริง)', 'info');
+        return;
+      }
+
+      showToast(`🔎 พบไฟล์บิลจริง ${driveFiles.length} ไฟล์ — เริ่มส่งให้ AI อ่านเนื้อหาทีละใบ...`, 'info');
+
+      let successCount = 0;
+      let skippedCount = 0;
+      let failCount = 0;
+      const results: any[] = [];
+
+      for (let i = 0; i < driveFiles.length; i++) {
+        const f = driveFiles[i];
+        setScanProgress({
+          current: i + 1,
+          total: driveFiles.length,
+          fileName: f.fileName,
+          billNo: '-',
+          supplier: '-',
+          weight: 'กำลังส่งให้ AI อ่าน...'
+        });
+
+        try {
+          // 2. สแกนไฟล์จริงทีละใบ (backend ดึงรูปจาก Drive แล้วให้ Gemini อ่านของจริง)
+          const scanRes = await fetch('/api/scan-drive-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ driveFileId: f.fileId, fileName: f.fileName })
+          });
+          const scanJson = await scanRes.json().catch(() => ({ success: false, error: 'เซิร์ฟเวอร์ตอบกลับไม่ถูกต้อง' }));
+
+          if (scanJson.success && scanJson.data) {
+            const doc = scanJson.data;
+            // แนบข้อมูลต้นทาง Drive เพื่อให้ระบบกันบิลซ้ำเช็คด้วยไฟล์ ID ได้
+            doc.driveFileId = f.fileId;
+            doc.remarks = doc.remarks || `[Drive] ${f.fileName}`;
+            // ถ้า AI ใช้ fallback จากชื่อไฟล์ (โควต้าเต็ม/เน็ตหลุด) = ข้อมูลไม่ได้อ่านจากใบจริง ให้ธงตรวจสอบเสมอ
+            if (doc.isAiFallback || doc.quotaExceeded) {
+              doc.needsReview = true;
+            }
+            onImportBotBill(doc);
+            results.push(doc);
+            successCount++;
+          } else if (scanRes.status === 404) {
+            // ดึงรูปจาก Drive ไม่ได้ (ส่วนใหญ่เพราะไฟล์ไม่ได้เปิดแชร์ลิงก์)
+            skippedCount++;
+          } else {
+            failCount++;
+          }
+        } catch (err) {
+          console.error(`Error scanning ${f.fileName}:`, err);
+          failCount++;
+        }
+
+        // พักระหว่างคิว ป้องกันยิง AI ถี่เกิน (โควต้า)
+        await new Promise(r => setTimeout(r, 800));
+      }
+
+      setScannedHistory(prev => [...results, ...prev]);
+      setScanProgress(null);
+      setIsBatchAiScanning(false);
+
+      if (skippedCount > 0 || failCount > 0) {
+        showToast(`📊 สแกนจาก Drive เสร็จ: สำเร็จ ${successCount} ใบ | ข้าม (ดึงรูปไม่ได้ โปรดเปิดแชร์ลิงก์ไฟล์) ${skippedCount} ใบ | ล้มเหลว ${failCount} ใบ`, 'info');
+      } else {
+        showToast(`🎉 AI สแกนบิล"จริง"จาก Google Drive สำเร็จครบ ${successCount}/${driveFiles.length} ใบ! ข้อมูลลงตาราง 38 คอลัมน์และ Supabase เรียบร้อย`, 'success');
+      }
+    } catch (err: any) {
+      setIsBatchAiScanning(false);
+      setScanProgress(null);
+      showToast(`❌ สแกนจาก Drive ขัดข้อง: ${err.message || err} — (ฟีเจอร์นี้ต้องรันบนเซิร์ฟเวอร์ที่มี backend; GitHub Pages ไม่มี /api)`, 'error');
     }
-
-    setScannedHistory(prev => [...results, ...prev]);
-    setIsBatchAiScanning(false);
-    setScanProgress(null);
-    showToast(`🎉 AI สแกนและคีย์ข้อมูลบิลจาก Google Drive สำเร็จครบ ${results.length} บิล! ข้อมูลลงตาราง 38 คอลัมน์และ Supabase เรียบร้อยแล้ว`, 'success');
   };
 
   // Simulate Bot Push
@@ -527,9 +439,10 @@ function syncBillsOneByOneDirectly() {
       supplier: parsed.supplier || "โรงโม่ / ตั๋วชั่งนำเข้าจาก Drive",
       item_desc: parsed.category || "หินคลุก / หินผสม (Base & Subbase)",
       material_name: parsed.category || "หินคลุก / หินผสม (Base & Subbase)",
-      remarks: (item.folderPath || "") + (parsed.needsReview ? " [รอตรวจสอบประเภท]" : ""),
+      remarks: (item.folderPath || "") + " [จากชื่อไฟล์ - รอตรวจสอบกับใบจริง]" + (parsed.needsReview ? " [รอตรวจสอบประเภท]" : ""),
       photo_attachment: fileUrl,
-      needs_review: parsed.needsReview ? true : false
+      // ข้อมูลนี้ถอดจาก"ชื่อไฟล์"เท่านั้น (ไม่ได้อ่านจากใบจริงด้วย AI) → ติดธงรอตรวจสอบเสมอ
+      needs_review: true
     };
 
     let savedSuccess = false;
@@ -755,9 +668,10 @@ function syncInBatchesToSystem(batchSize) {
         supplier: parsed.supplier || "โรงโม่ / ตั๋วชั่งนำเข้าจาก Drive",
         item_desc: parsed.category || "หินคลุก / หินผสม (Base & Subbase)",
         material_name: parsed.category || "หินคลุก / หินผสม (Base & Subbase)",
-        remarks: (item.folderPath || "") + (parsed.needsReview ? " [รอตรวจสอบประเภท]" : ""),
+        remarks: (item.folderPath || "") + " [จากชื่อไฟล์ - รอตรวจสอบกับใบจริง]" + (parsed.needsReview ? " [รอตรวจสอบประเภท]" : ""),
         photo_attachment: file.getUrl(),
-        needs_review: parsed.needsReview ? true : false
+        // ข้อมูลนี้ถอดจาก"ชื่อไฟล์"เท่านั้น (ไม่ได้อ่านจากใบจริงด้วย AI) → ติดธงรอตรวจสอบเสมอ
+        needs_review: true
       });
 
       logsPayload.push({
@@ -1310,9 +1224,10 @@ function sendFileToWebhook(file, logSheet, folderPath, useAI) {
           supplier: supplier,
           item_desc: category,
           material_name: category,
-          remarks: (folderPath || "") + (parsed.needsReview ? " [รอตรวจสอบประเภท]" : ""),
+          remarks: (folderPath || "") + " [จากชื่อไฟล์ - รอตรวจสอบกับใบจริง]" + (parsed.needsReview ? " [รอตรวจสอบประเภท]" : ""),
           photo_attachment: fileUrl,
-          needs_review: parsed.needsReview ? true : false
+          // ข้อมูลนี้ถอดจาก"ชื่อไฟล์"เท่านั้น (ไม่ได้อ่านจากใบจริงด้วย AI) → ติดธงรอตรวจสอบเสมอ
+          needs_review: true
         };
 
         const resBuf = UrlFetchApp.fetch(bufUrl, {

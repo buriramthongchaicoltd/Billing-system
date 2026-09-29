@@ -5,6 +5,51 @@
 
 ---
 
+## [2026-09-29] รอบที่ 24 — ล็อกโมเดล AI เป็น gemini-3.1-flash-lite ตัวเดียว + พิสูจน์การอ่านโฟลเดอร์ซ้อน (ปี→เดือน) และโฟลเดอร์ใหม่
+
+- **ผู้ดำเนินการ:** Buffy (AI / Senior Architect) — ความต้องการจากผู้ใช้: (1) ใช้ gemini-3.1-flash-lite เป็นตัวหลักตัวเดียว เพื่อป้องกันการเปลี่ยนรุ่นแล้วอ่านข้อมูลไม่เหมือนเดิม (2) ยืนยันว่าถ้ามีการสร้างโฟลเดอร์ใหม่ใน Drive (หลัก → ปี → เดือน) ระบบจะอ่านได้หรือไม่
+- **การแก้แบบเจาะจงจุด:**
+  1. **[server.ts] ล็อกโมเดล:** เดิม `candidateModels` มี 3 โมเดล (gemini-3.1-flash-lite → gemini-flash-latest → gemini-3.8-flash) — หากโมเดลหลักโควต้าเต็มชั่วคราว ระบบจะสลับไปโมเดลอื่นอัตโนมัติ = ผลการอ่านอาจ"ไม่เหมือนเดิม"ข้ามรุ่น ตามที่ผู้ใช้กังวล → **ล็อกเหลือ ['gemini-3.1-flash-lite'] ตัวเดียว**; หากโมเดลนี้ล้มเหลว → ใช้ fallback จากชื่อไฟล์ + ติดธง needsReview ให้ผู้ใช้ตรวจ (ไม่เดาด้วยโมเดลอื่น) — ตรวจแล้ว SDK รองรับโมเดลนี้อย่างเป็นทางการ, ไม่มีการอ้างโมเดลอื่นค้างในโค้ด
+  2. **การพิสูจน์เรื่องโฟลเดอร์ (ไม่แก้โค้ด เพราะออกแบบไว้ถูกแล้ว):** `/api/drive-list-files` ค้นหาโครงสร้างแบบ BFS แบบไดนามิกทุกครั้งที่กดสแกน (ไม่มีการ hardcode path) — ทดสอบจริงกับ Drive ของผู้ใช้: สำรวจ root → เจอโฟลเดอร์ "2026" → เจอ "09" → ดึงไฟล์จริง 50 ใบ (foldersChecked=3, หยุดเพราะครบ limit) ✅ พิสูจน์ว่าโฟลเดอร์"ปี→เดือน"ถูกอ่านอัตโนมัติ
+- **คำตอบเชิงระบบสำหรับโฟลเดอร์ใหม่:** เมื่อสร้างโฟลเดอร์ใหม่ (เช่น "10" สำหรับเดือนต.ค.) แล้วยังอยู่ใต้โฟลเดอร์ที่เปิดแชร์ลิงก์เดิม: การกดสแกนครั้งถัดไปจะ**เจอและอ่านได้อัตโนมัติ** ไม่ต้องตั้งค่าใหม่ (จำกัดความลึก 6 ชั้น / 50 โฟลเดอร์ต่อรอบ พอสำหรับปี→เดือนหลายปี) — แต่ถ้าสร้าง"โฟลเดอร์หลักใหม่ทั้งคัน"ในตำแหน่งอื่น ต้องเอา ID ของโฟลเดอร์นั้นมาใส่แทน (ระบบเก็บต่อ 1 โฟลเดอร์หลัก) — ข้อจำกัดเดียว: โฟลเดอร์ต้องเปิดแชร์ลิงก์ Anyone with the link
+- **Cascading Consistency:** สแกนผ่านหน้าเว็บ (`/api/drive-list-files` + `/api/scan-drive-file` + `handleRunDriveAiScan` จากรอบที่ 23) และบอท GAS (getFilesRecursive จากรอบที่ 18) ทั้งสองเส้นทางใช้หลัก recursive ทั้งคู่ ไม่ขัดแย้งกัน; โมเดลถูกอ้างจากจุดเดียว (performBillAiExtraction) ไม่มีจุดอื่น hardcode ชื่อโมเดล
+- **การทดสอบ:** `npm run lint` ผ่าน 0 error ✅ / ทดสอบ list ไฟล์จริง 50 ใบจากโครงสร้างซ้อน 3 ชั้นสำเร็จ ✅
+- **ไฟล์ที่แก้:** `server.ts` (บล็อก candidateModels + comment)
+
+## [2026-09-29] รอบที่ 23 — แก้ปุ่มสแกนให้ใช้ไฟล์จริงจาก Drive + ยิง AI จริง (ลบข้อมูลปลอม) + ธง needs_review ครบทุกเส้นทาง
+
+- **ผู้ดำเนินการ:** Buffy (AI / Senior Architect) — โจทย์จากผู้ใช้: แก้ปุ่ม 'ทดสอบสแกนทันที' ให้ดึงไฟล์จริงจาก Google Drive แล้วส่งเข้า AI จริง แทน driveSampleBills (hardcoded) + แก้ GAS ให้ needs_review เป็น true เมื่อข้อมูลมาจากชื่อไฟล์
+- **การแก้แบบเจาะจง Function (ไม่ลบฟังก์ชันเดิมอื่น):**
+  1. **[AutoBotSyncModal.tsx] รีไรท์ `handleRunDriveAiScan()`** — ลบ `driveSampleBills` 8 ใบที่เป็นข้อมูลปลอมทิ้งทั้งก้อน; แทนด้วย: เรียก `/api/drive-list-files` ขอรายชื่อไฟล์"จริง"จากโฟลเดอร์ → วนส่งทีละไฟล์เข้า `/api/scan-drive-file` ให้ Gemini อ่านของจริง → ส่งผลให้ `onImportBotBill` (ระบบกันซ้ำ/จัดเส้นทางเดิมทำงานเหมือนเดิมทุกอย่าง); ถ้า AI ใช้ fallback จากชื่อไฟล์ (โควต้าเต็ม/เน็ตหลุด) ตั้ง `doc.needsReview = true` อัตโนมัติ; แจ้ง error ชัดว่าฟีเจอร์นี้ต้องรันบนเครื่องที่มี backend (GitHub Pages ไม่มี /api)
+  2. **[server.ts] เพิ่ม endpoint `POST /api/drive-list-files`** — ดึงรายชื่อไฟล์จริงจากโฟลเดอร์ Drive ที่เปิดแชร์ลิงก์ ผ่านหน้า public `embeddedfolderview` (ไม่ต้องมี Google API Key); **สำรวจทะลุโฟลเดอร์ย่อยทุกชั้น** (BFS + visited set กันวงวน + จำกัด 50 โฟลเดอร์/ความลึก 6) เพราะพิสูจน์จริงแล้วโฟลเดอร์หลักมีเพียงโฟลเดอร์ย่อย "2026 > 09" ไฟล์บิลอยู่ชั้นใน; กรองเฉพาะ .jpg/.png/.webp/.heic/.pdf
+  3. **[AutoBotSyncModal.tsx — GAS template] แก้ `needs_review: true` ครบทั้ง 3 เส้นทาง** (เดิม hardcode false/มีเงื่อนไข): `syncBillsOneByOneDirectly`, `sendFileToWebhook`, `syncInBatchesToSystem` + แผกรายการ remarks เพิ่ม "[จากชื่อไฟล์ - รอตรวจสอบกับใบจริง]" เพราะข้อมูลในสคริปต์ถอดจากชื่อไฟล์เท่านั้น ไม่เคยอ่านใบจริงด้วย AI แม้แต่ครั้งเดียว
+  4. **[server.ts] แก้ `/api/bot-import-bill`** ให้สอดคล้อง (Cascading Consistency): ถ้าไม่มีรูปส่งเข้ามา = ข้อมูลมาจากชื่อไฟล์/ค่า default → `needs_review: true`; ถ้ามีรูปแต่ AI ใช้ fallback (isAiFallback/quotaExceeded) → `needs_review: true`
+  5. **[App.tsx] แสดงธงตรวจสอบในกล่องพักรอ** — การ์ดที่ `needsReview: true` เปลี่ยนเป็นขอบเหลือง + ป้าย "ข้อมูลจากชื่อไฟล์ — ต้องตรวจสอบกับใบจริงก่อนชนบิล" (ไม่งั้นตั้งธงไว้แต่ไม่มีใครเห็น)
+- **การทดสอบรันจริง (พิสูจน์ ไม่ใช่เดา):**
+  1. `npm run lint` (tsc --noEmit) ผ่าน 0 error ✅
+  2. รัน server + ยิง `/api/drive-list-files` กับโฟลเดอร์จริง → **ได้ไฟล์จริง 10 ใบจากโฟลเดอร์ย่อย 2026 > 09** (เช่น BTC_Receipt_20260919_132115_...jpg) ✅
+  3. ยิง `/api/scan-drive-file` กับไฟล์จริง 1 ใบ → ระบบ fallback ทำงานถูกต้อง (เครื่องนี้ไม่มี GEMINI_API_KEY → ติดธง quotaExceeded → จะถูกตั้ง needsReview อัตโนมัติ) ✅
+  4. ปิด server ทดสอบเรียบร้อย ✅
+- **ข้อจำกัดที่ผู้ใช้ต้องรู้:** (1) ปุ่มสแกนจริงใช้ได้เฉพาะเมื่อรันบนเครื่องที่มี backend (`npm run dev` / Render) — บน GitHub Pages จะแจ้งเตือนชัดเจนว่าไม่มี /api (2) `/api/scan-drive-file` ดึงรูปได้เฉพาะไฟล์ที่เปิดแชร์ลิงก์ "Anyone with the link" (3) หากต้องการให้ AI อ่านใบจริงต้องตั้ง `GEMINI_API_KEY` ใน .env มิฉะนั้นจะใช้ fallback จากชื่อไฟล์ + ติดธงตรวจสอบทุกใบ
+- **ไฟล์ที่แก้:** `src/components/AutoBotSyncModal.tsx`, `server.ts`, `src/App.tsx`
+
+---
+
+## [2026-09-29] รอบที่ 22 — เตรียมไฟล์สำหรับให้ผู้ใช้ push ขึ้น GitHub เอง (ไม่มีการ push โดย AI)
+
+- **ผู้ดำเนินการ:** Buffy (AI / Senior Architect) — ผู้ใช้ตัดสินใจ: "ผม push เอง ดีกว่า" (AI ไม่แตะ git ตามกฎ)
+- **การแก้ไขโค้ดระบบ:** ไม่มี (สร้างไฟล์ประกอบการ deploy เท่านั้น)
+- **สิ่งที่สร้าง:**
+  1. **[.gitignore]** — กัน push `node_modules/` (หลายพันไฟล์), `dist/` (build output ที่ Actions จะ build เอง), `.env*` (secret) และ log ขึ้น GitHub
+  2. **[.github/workflows/deploy.yml]** — GitHub Actions: ทุกครั้งที่ push บน branch `main` ระบบจะ `npm install` + `npm run build` + deploy โฟลเดอร์ `dist` ขึ้น GitHub Pages เองอัตโนมัติ (ผู้ใช้ไม่ต้อง build/อัปโหลดไฟล์เองอีก แค่ push โค้ดต้นฉบับ)
+- **ขั้นตอนที่ผู้ใช้ต้องทำเอง (ครั้งเดียว):**
+  1. สร้าง repo ใหม่บน GitHub (เช่น `btc-bill-recon`)
+  2. ในเครื่อง: `git init` → `git add .` → `git commit -m "first"` → `git branch -M main` → `git remote add origin https://github.com/<user>/<repo>.git` → `git push -u origin main`
+  3. บน GitHub: Settings → Pages → **Source เลือก "GitHub Actions"** (สำคัญมาก ไม่ใช่ Deploy from a branch)
+  4. หลัง push: ดูแถบ Actions จน deploy เสร็จ (ประมาณ 1-2 นาที) เว็บจะอยู่ที่ `https://<user>.github.io/<repo>/`
+- **ที่มาจากรอบที่ 21:** แก้ `base: './'` + inline favicon แล้ว ทำให้ deploy ใต้ subpath ของ GH Pages แสดงผลได้ถูกต้อง
+- **การทดสอบ:** `npm run lint` ผ่าน ✅ / ไฟล์ทั้งสองอยู่ในตำแหน่งที่ Actions อ่านเจอ ✅
+
 ## [2026-09-29] รอบที่ 21 — แก้หน้าเว็บขาว (Blank Page) หลัง push ขึ้น GitHub Pages + 404 favicon (Targeted Editing 2 จุด)
 
 - **ผู้ดำเนินการ:** Buffy (AI / Senior Architect) — โจทย์จากผู้ใช้: push ขึ้น Host อย่าง GitHub แล้วหน้าเว็บแสดงเป็นหน้าเปล่าสีขาว + console error: `Failed to load resource: 404` และ `favicon.ico: 404`
