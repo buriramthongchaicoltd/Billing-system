@@ -1,0 +1,6 @@
+{
+  "name": "ระบบชนบิลขนส่ง & วัสดุก่อสร้าง (38 คอลัมน์)",
+  "description": "ระบบกระทบยอดบิลตั๋วขนส่งและวัสดุก่อสร้าง 38 คอลัมน์มาตรฐาน ตรวจสอบและจับคู่ตั๋วต้นทาง-ปลายทาง",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
