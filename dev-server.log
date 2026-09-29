@@ -1,0 +1,12 @@
+
+> react-example@0.0.0 dev
+> tsx server.ts
+
+◇ injected env (0) from .env // tip: ⌘ enable debugging { debug: true }
+API key should be set when using the Gemini API.
+API key should be set when using the Gemini API.
+Server running on port 3000
+[2m15:49:18[22m [36m[1m[vite][22m[39m [32mvite.config.ts changed, restarting server...[39m
+[2m15:49:18[22m [36m[1m[vite][22m[39m server restarted.
+[2m15:50:28[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2mindex.html[22m
+[2m15:52:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m

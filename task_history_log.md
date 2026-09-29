@@ -5,6 +5,45 @@
 
 ---
 
+## [2026-09-29] รอบที่ 21 — แก้หน้าเว็บขาว (Blank Page) หลัง push ขึ้น GitHub Pages + 404 favicon (Targeted Editing 2 จุด)
+
+- **ผู้ดำเนินการ:** Buffy (AI / Senior Architect) — โจทย์จากผู้ใช้: push ขึ้น Host อย่าง GitHub แล้วหน้าเว็บแสดงเป็นหน้าเปล่าสีขาว + console error: `Failed to load resource: 404` และ `favicon.ico: 404`
+- **Root Cause (พิสูจน์ด้วยการจำลองจริง ไม่ใช่เดา):**
+  1. Vite build ค่าเริ่มต้น (`base: '/'`) ผลิต `dist/index.html` ที่อ้างไฟล์แบบ absolute path เช่น `/assets/index-*.js`
+  2. GitHub Pages project site serve ไฟล์ใต้ subpath `https://user.github.io/ชื่อrepo/` — browser จึงไปขอ `/assets/...` ที่ root ของ domain ซึ่งไม่มีไฟล์ → HTTP 404 → JS bundle โหลดไม่ได้ → `<div id="root">` ว่างเปล่า → **หน้าขาวทั้งหน้า**
+  3. การพิสูจน์: จำลอง subpath server (`/repo/` serve จาก dist เดิม) แล้วยิงขอ JS ตาม path ที่หน้าเว็บเรียก → ได้ **HTTP 404 ตรงกับอาการผู้ใช้เป๊ะ** ก่อนแก้
+- **การแก้ (เจาะจงจุด ไม่แตะส่วนอื่น):**
+  1. **[vite.config.ts]** เพิ่ม `base: './'` บรรทัดเดียว → build อ้างไฟล์แบบ relative (`./assets/...`) ทำงานได้ทั้ง root domain และ subpath ทุก repo โดยไม่ต้อง hardcode ชื่อ repo
+  2. **[index.html]** เพิ่ม inline SVG favicon (data URI รูปรถบรรทุก) แก้ `favicon.ico 404` โดยไม่เพิ่มไฟล์ใหม่
+- **การทดสอบหลังแก้ (รันจริง):**
+  1. `npm run build` ใหม่ → ตรวจ dist/index.html: `src="./assets/index-*.js"` (relative แล้ว) ✅
+  2. serve จำลอง GitHub Pages subpath ซ้ำ → JS และ CSS ทุกไฟล์ **HTTP 200** ✅
+  3. เปิดเบราว์เซอร์จริงที่ `http://localhost:3101/repo/` → หน้าเว็บแสดงครบ (header + ตาราง 38 คอลัมน์ + ปุ่มครบ) root มีเนื้อหา, console ไม่มี 404 ✅
+  4. `npm run lint` (tsc --noEmit) ผ่าน 0 error / ลบไฟล์ทดสอบชั่วคราวแล้ว ✅
+- **⚠️ ข้อจำกัดสำคัญที่ผู้ใช้ต้องรู้ (Side Effect ระดับระบบ):** GitHub Pages เป็น static host **รองรับเฉพาะ Frontend** — ทุกฟีเจอร์ที่พึ่ง backend จะใช้ไม่ได้บน GH Pages: OCR AI สแกนบิล (`/api/ocr-scan`), Bot ingestion (`/api/bot-import-*`), คีย์บอท (fetch `/api/...` จะ 404) และ Gemini API key ห้ามไปอยู่ในโค้ด static — **Frontend ยังใช้ได้ปกติ:** ตาราง 38 คอลัมน์, คีย์บิลเอง, ชนบิล, จัดการโครงการ, LocalStorage, Supabase Cloud (เชื่อมตรงจาก browser) และสคริปต์ GAS ยังส่งเข้า Supabase ตรงได้เหมือนเดิม — ถ้าต้องการ OCR/Bot ครบ ต้อง deploy บน host แบบ server ได้ (เช่น Render/Railway/Fly.io/VPS)
+- **ไฟล์ที่แก้:** `vite.config.ts` (+3 บรรทัด), `index.html` (+2 บรรทัด)
+
+---
+
+## [2026-09-29] รอบที่ 20 — ทวนโค้ดทุกไฟล์บนสถาปัตยกรรมใหม่ + พิสูจน์ด้วยการรันจริง (Code Review ไม่มีการแก้โค้ด)
+
+- **ผู้ดำเนินการ:** Buffy (AI / Senior Architect) — โจทย์จากผู้ใช้: ทวนโค้ดทุกไฟล์และทำความเข้าใจโครงสร้าง พร้อม Challenge & Critique
+- **การแก้ไขโค้ด:** ไม่มี (ติดตั้ง dependencies + รันทดสอบเท่านั้น)
+- **ไฟล์ที่อ่านครบทุกบรรทัด/ทุกส่วนสำคัญ (8,549 บรรทัดรวม 12 ไฟล์):** server.ts (612), App.tsx (1,986), types.ts (355), matcher.ts (118), sampleData.ts (427), AutoBotSyncModal.tsx (2,370), BillDetailEditModal.tsx (1,164), ProjectManagerModal.tsx (450), supabaseClient.ts (52), supabaseCrud.ts (628), index.css, vite.config.ts + task_history_log.md ทั้งไฟล์
+- **การทดสอบรันจริง (พิสูจน์ ไม่ใช่เดา):**
+  1. `npm install --legacy-peer-deps` สำเร็จ / `npm run lint` (tsc --noEmit) ผ่าน 0 error ✅
+  2. รัน `npm run dev` (PORT=3000) + เปิดเบราว์เซอร์จริง ✅
+  3. **ทดสอบสมมติฐาน "ProjectManagerModal ผิด Rules of Hooks"** (early `return null` ก่อน useState 8 ตัว): เปิด modal → กรอกฟอร์ม → บันทึก → **บันทึกสำเร็จจริง** (badge 1→2 โครงการ, localStorage เพิ่ม 2 แถว) รวมถึงเคสเปิด-ปิด-เปิดซ้ำ (remount) ก็ทำงานได้ → **React 19 ทนเคสนี้ได้จริง สมมติฐาน P0 crash ถูกหักล้าง** (แต่ยังเป็น code smell ที่ห้ามฝืนใช้ต่อ เพราะ Conditional Hooks ขัดกฎของ React และพังแน่ในเวอร์ชัน/โหมดอื่น) ✅
+  4. ปิดประเด็น: การบันทึกไม่สำเร็จครั้งแรกที่พบ เกิดจาก tester กรอกฟอร์มไม่ครบ (required fields) ไม่ใช่บั๊กระบบ
+- **ข้อสรุปเชิงโครงสร้าง (สถาปัตยกรรมปัจจุบัน):** React 19 + Vite 8 + Express + Supabase (REST + Realtime) + Gemini Vision (server-side) + Google Apps Script Bot (Drive → Supabase ตรง) — 3 ตารางหลัก: reconciliation_records (38 คอลัมน์), bills_buffer, drive_sync_logs
+- **จุดอ่อนระดับระบบที่ตรวจพบ (ยังไม่แก้ — รอการตัดสินใจของผู้ใช้):**
+  1. **[P1 Data-Integrity] ปุ่ม "⚡ ทดสอบสแกนทันที" ใน AutoBotSyncModal เป็นข้อมูลปลอม hardcoded** (`driveSampleBills` 8 ใบในโค้ด) ไม่ได้ยิงไป Drive/OCR จริง ผู้ใช้เชื่อว่าเป็นการสแกนจริง → เสี่ยงข้อมูลปลอมปนตารางจริง
+  2. **[P1 Security] RLS ตารางทั้ง 4 เป็น `USING (true)`** + Anon Key ฝังใน GAS template — ใครก็อ่าน/เขียน/ลบ DB ได้ทั้งระบบจากภายนอก (โค้ดสาธารณะบน GitHub)
+  3. **[P1 ประสิทธิภาพ] รูปบิลเก็บ full-base64 ลง localStorage** (ขีดจำกัด ~5-10MB) + ลง Supabase TEXT — อัปโหลด 10-20 ใบเก็บสถานะจะ QuotaExceededError ทันที (ระบบมี .catch กลืน error → เสียข้อมูลเงียบ ๆ)
+  4. **[P2 ความจริงของ AI] สคริปต์ GAS ใหม่ (บันทึก Supabase ตรง) ไม่มีการเรียก AI เลย** — ข้อมูลมาจากชื่อไฟล์ `parseFileNameInfo` เท่านั้น (ต่างจากประกาศในหัวสคริปต์ที่บอกว่า "AI อ่านตัวเลข") / `/api/scan-drive-file` ที่สร้างไว้ไม่มีใครเรียกใช้ (dead code)
+  5. **[P2 ความสม่ำเสมอ] server.ts ยังตั้ง `needs_review: false` ทุกบิลที่เดาจากชื่อไฟล์** + ค่า fallback แปลก ๆ (`netWeight: 30.5`, ทะเบียน `82-9988 บร`, destTare 14,000) ปนข้อมูลจริงโดยไม่มีธงตรวจสอบ
+  6. **[P3 UX] ยังมี window.alert/confirm 20 จุด** (ขัดมาตรฐานที่ตั้งไว้รอบ 19 และบล็อก UI) / exportCSV ใช้ `records` ทั้งหมดไม่สน filter ที่เลือกไว้ / dead imports (INITIAL_RECORDS/INITIAL_BUFFER, Camera, Flag ฯลฯ) / ProjectManagerModal ผิด Rules of Hooks (พิสูจน์แล้วว่ายังไม่พังใน React 19 แต่ต้องแก้เชิงป้องกัน)
+- **ข้อเสนอลำดับความสำคัญถัดไป:** แก้ 1→2→3 ตามลำดับ (ข้อมูลปลอม→สิทธิ์ DB→รูปภาพ) แล้วค่อยไล่ P2/P3
 ## [2026-09-29] รอบที่ 19 — แก้ไขปัญหา "ไม่เห็นบันทึกลงฐานข้อมูล Supabase" + ปลดล็อก "ติดโควต้า Gmail ปลอม" ด้วยการเชื่อมตรงเข้า Supabase REST API 100%
 
 - **ผู้ดำเนินการ:** Senior Full-Stack & Database Architect (AI)

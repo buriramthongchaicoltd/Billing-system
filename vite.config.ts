@@ -5,6 +5,9 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    // base './' = อ้างไฟล์แบบ relative path → deploy ได้ทั้ง root และ subpath
+    // (เช่น GitHub Pages project site: user.github.io/ชื่อrepo/) โดยไม่หน้าขาว
+    base: './',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
