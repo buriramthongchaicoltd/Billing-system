@@ -5,6 +5,21 @@
 
 ---
 
+## [2026-09-29] รอบที่ 26 — พิสูจน์จากเว็บ live จริง: 404 ไม่ใช่ปัญหาโค้ด แต่เว็บ/หน้า Pages ถูกถอนทั้งหมด (ไม่มีการแก้โค้ด)
+
+- **ผู้ดำเนินการ:** Buffy (AI / Senior Architect) — ผู้ใช้แจ้งอาการเดิม: `main.tsx:1 Failed to load resource: 404`
+- **การพิสูจน์จากของจริง (curl เว็บที่ live โดยตรง):**
+  1. `https://buriramthongchailtd.github.io/Billing-system/` → **HTTP 404** (ไม่ใช่หน้าเว็บเก่า/ไม่มี index.html ตกค้าง — เป็นหน้า 404 มาตรฐานของ GitHub Pages เอง)
+  2. `/index.html`, `/assets/`, และหน้า deployments ของ repo → 404 ทั้งหมด
+  3. **ตัว repo `buriramthongchailtd/Billing-system` เอง → HTTP 404 เมื่อเข้าแบบไม่ล็อกอิน** = repo ตอนนี้เป็น Private / ถูกเปลี่ยนชื่อ / หรือถูกลบไปแล้ว
+- **ข้อสรุป:** อาการ 404 ที่ผู้ใช้เห็น"ไม่ใช่"ปัญหาโค้ดหรือการ build (build รอบที่ 25 ถูกต้องแล้ว) — แต่ GitHub Pages ถูกถอน/ปิดไป หรือ repo ไม่สาธารณะ (โปรดทราบ: **GitHub Pages ของ repo Private ใช้ได้เฉพาะแพ็กเกจ Pro/Team** — Free ต้อง repo Public เท่านั้น)
+- **สิ่งที่ผู้ใช้ต้องเช็ค/ทำเอง:**
+  1. เปิด `https://github.com/buriramthongchailtd?tab=repositories` ดูว่า repo `Billing-system` ยังอยู่หรือเปลี่ยนชื่อไป และตั้งเป็น Public หรือ Private
+  2. ถ้าเป็น Private และใช้ Free plan → เปลี่ยนเป็น Public (Settings → General → Danger Zone → Change visibility) หรือใช้ host อื่น (Render/Cloudflare Pages) สำหรับ repo ส่วนตัว
+  3. Settings → Pages → ยืนยันว่า Source ยังเป็น Deploy from a branch (main /root) และมีข้อความ "Your site is live"
+  4. หลังแน่ใจว่า repo Public แล้ว: อัปโหลดเนื้อหาใน dist/ (จากรอบที่ 25) ทับ root ของ repo แทนซอร์สโค้ด (หรือเปลี่ยนไปใช้ GitHub Actions workflow ตามรอบที่ 22)
+- **ไฟล์ที่แก้:** ไม่มี (รอบนี้เป็นการวินิจฉัยเท่านั้น)
+
 ## [2026-09-29] รอบที่ 25 — Build ตัวล่าสุดพร้อมอัปโหลดทับ GitHub Pages (ไม่มีการแก้โค้ด)
 
 - **ผู้ดำเนินการ:** Buffy (AI / Senior Architect) — ผู้ใช้แจ้งอาการซ้ำ: `main.tsx:1 Failed to load resource: 404` บนเว็บที่ deploy แล้ว
