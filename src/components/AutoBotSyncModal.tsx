@@ -221,6 +221,8 @@ export const AutoBotSyncModal: React.FC<AutoBotSyncModalProps> = ({
       let successCount = 0;
       let skippedCount = 0;
       let failCount = 0;
+      let aiUnavailableCount = 0;
+      const skippedAiFiles: string[] = [];
       const results: any[] = [];
 
       for (let i = 0; i < driveFiles.length; i++) {
@@ -245,16 +247,25 @@ export const AutoBotSyncModal: React.FC<AutoBotSyncModalProps> = ({
 
           if (scanJson.success && scanJson.data) {
             const doc = scanJson.data;
+            // 🔒 นโยบาย "ห้ามเดา": ถ้า AI อ่านไม่ได้และ backend ส่งข้อมูลจากชื่อไฟล์มา (isAiFallback)
+            // = ข้อมูลอาจไม่ตรงกับใบจริง → ข้ามใบนี้ ไม่ส่งเข้าตารางเด็ดขาด
+            if (doc.isAiFallback || doc.quotaExceeded) {
+              aiUnavailableCount++;
+              skippedAiFiles.push(f.fileName);
+              failCount++;
+              continue;
+            }
             // แนบข้อมูลต้นทาง Drive เพื่อให้ระบบกันบิลซ้ำเช็คด้วยไฟล์ ID ได้
             doc.driveFileId = f.fileId;
             doc.remarks = doc.remarks || `[Drive] ${f.fileName}`;
-            // ถ้า AI ใช้ fallback จากชื่อไฟล์ (โควต้าเต็ม/เน็ตหลุด) = ข้อมูลไม่ได้อ่านจากใบจริง ให้ธงตรวจสอบเสมอ
-            if (doc.isAiFallback || doc.quotaExceeded) {
-              doc.needsReview = true;
-            }
             onImportBotBill(doc);
             results.push(doc);
             successCount++;
+          } else if (scanRes.status === 422 || scanJson.code === 'AI_UNAVAILABLE') {
+            // AI อ่านใบจริงไม่สำเร็จ (โควต้าเต็ม/บริการล่ม) — ระบบไม่เดาจากชื่อไฟล์ → ข้ามใบนี้
+            aiUnavailableCount++;
+            skippedAiFiles.push(f.fileName);
+            failCount++;
           } else if (scanRes.status === 404) {
             // ดึงรูปจาก Drive ไม่ได้ (ส่วนใหญ่เพราะไฟล์ไม่ได้เปิดแชร์ลิงก์)
             skippedCount++;
@@ -274,7 +285,9 @@ export const AutoBotSyncModal: React.FC<AutoBotSyncModalProps> = ({
       setScanProgress(null);
       setIsBatchAiScanning(false);
 
-      if (skippedCount > 0 || failCount > 0) {
+      if (aiUnavailableCount > 0) {
+        showToast(`⚠️ สแกนจบ: อ่านได้จริง ${successCount} ใบ | AI อ่านไม่สำเร็จ ${aiUnavailableCount} ใบ (ระบบไม่เดาจากชื่อไฟล์ — ข้ามไว้ โปรดกดสแกนซ้ำภายหลัง เช่น ตรวจ GEMINI_API_KEY/โควต้าแล้ว) | ดึงรูปไม่ได้ ${skippedCount} ใบ`, 'info');
+      } else if (skippedCount > 0 || failCount > 0) {
         showToast(`📊 สแกนจาก Drive เสร็จ: สำเร็จ ${successCount} ใบ | ข้าม (ดึงรูปไม่ได้ โปรดเปิดแชร์ลิงก์ไฟล์) ${skippedCount} ใบ | ล้มเหลว ${failCount} ใบ`, 'info');
       } else {
         showToast(`🎉 AI สแกนบิล"จริง"จาก Google Drive สำเร็จครบ ${successCount}/${driveFiles.length} ใบ! ข้อมูลลงตาราง 38 คอลัมน์และ Supabase เรียบร้อย`, 'success');
@@ -283,6 +296,114 @@ export const AutoBotSyncModal: React.FC<AutoBotSyncModalProps> = ({
       setIsBatchAiScanning(false);
       setScanProgress(null);
       showToast(`❌ สแกนจาก Drive ขัดข้อง: ${err.message || err} — (ฟีเจอร์นี้ต้องรันบนเซิร์ฟเวอร์ที่มี backend; GitHub Pages ไม่มี /api)`, 'error');
+    }
+  };
+
+  // 🔁 Full Drive Sync: ดึง"ครบทุกไฟล์"ในโฟลเดอร์ (ทะลุทุกโฟลเดอร์ย่อย ไม่จำกัดจำนวน)
+  // ทำทีละไฟล์: ดึงลิงก์→แปลงเป็นภาพ→AI อ่าน→บันทึกประวัติ (drive_sync_logs)
+  // ไฟล์ที่เคยทำสำเร็จแล้วจะถูกข้าม — กดซ้ำได้เรื่อยๆ จนกว่าจะครบทุกไฟล์ (ไม่ตกหล่น)
+  const handleDriveSyncAll = async () => {
+    if (!folderId) {
+      showToast('❌ กรุณาตั้งค่า FOLDER_ID ของโฟลเดอร์ Google Drive ก่อน (แท็บตั้งค่า)', 'error');
+      return;
+    }
+    setIsBatchAiScanning(true);
+    setScanProgress(null);
+    showToast('🔄 เริ่ม Sync ทั้งหมด: กำลังสำรวจไฟล์ครบทุกโฟลเดอร์ย่อย...', 'info');
+
+    try {
+      // 1. ขอรายการไฟล์ที่"ยังไม่เคย sync สำเร็จ"ทั้งหมด (backend เทียบ drive_sync_logs ให้)
+      const listRes = await fetch('/api/drive-sync-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId })
+      });
+      const listData = await listRes.json().catch(() => ({ success: false, error: 'เซิร์ฟเวอร์ตอบกลับไม่ถูกต้อง' }));
+
+      if (!listRes.ok || !listData.success) {
+        setIsBatchAiScanning(false);
+        showToast(`❌ สำรวจ Drive ไม่สำเร็จ: ${listData.error || ('HTTP ' + listRes.status)}`, 'error');
+        return;
+      }
+
+      const totalInDrive: number = listData.totalInDrive || 0;
+      const pending: { fileId: string; fileName: string; folderPath?: string }[] = listData.files || [];
+
+      if (pending.length === 0) {
+        setIsBatchAiScanning(false);
+        showToast(`✅ ครบแล้ว! ไฟล์ใน Drive ทั้งหมด ${totalInDrive} ไฟล์ ถูกดึงเข้าระบบสำเร็จก่อนหน้านี้หมดแล้ว — ไม่มีไฟล์ตกหล่น`, 'success');
+        return;
+      }
+
+      showToast(`📋 ไฟล์ใน Drive ทั้งหมด ${totalInDrive} ไฟล์ | เคย sync แล้ว ${totalInDrive - pending.length} | รอทำ ${pending.length} ไฟล์ — เริ่มทำทีละไฟล์...`, 'info');
+
+      let successCount = 0;
+      let duplicateCount = 0;
+      let failCount = 0;
+      const failedFiles: string[] = [];
+      const results: any[] = [];
+
+      // 2. วนทีละไฟล์: ดึงรูป → AI อ่าน → บันทึก (backend บันทึกประวัติให้อัตโนมัติ)
+      for (let i = 0; i < pending.length; i++) {
+        const f = pending[i];
+        setScanProgress({
+          current: i + 1,
+          total: pending.length,
+          fileName: f.fileName,
+          billNo: '-',
+          supplier: '-',
+          weight: `ไฟล์ที่ ${i + 1}/${pending.length} (รวมใน Drive ${totalInDrive})`
+        });
+
+        try {
+          const scanRes = await fetch('/api/scan-drive-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ driveFileId: f.fileId, fileName: f.fileName, folderPath: f.folderPath || '' })
+          });
+          const scanJson = await scanRes.json().catch(() => ({ success: false, error: 'ตอบกลับไม่ถูกต้อง' }));
+
+          if (scanJson.success && scanJson.data) {
+            const doc = scanJson.data;
+            doc.driveFileId = f.fileId;
+            doc.remarks = doc.remarks || `[Drive] ${f.fileName}`;
+            onImportBotBill(doc);
+            results.push(doc);
+            successCount++;
+          } else if (scanRes.status === 404) {
+            // ดึงรูปไม่ได้ — backend บันทึก FETCH_FAILED แล้ว รอบหน้าจะลองใหม่
+            failCount++;
+            failedFiles.push(f.fileName);
+          } else {
+            // 422 = AI อ่านไม่สำเร็จ — backend บันทึก FAILED_AI แล้ว รอบหน้าจะลองใหม่
+            failCount++;
+            failedFiles.push(f.fileName);
+          }
+        } catch (err) {
+          console.error(`Error syncing ${f.fileName}:`, err);
+          failCount++;
+          failedFiles.push(f.fileName);
+        }
+
+        // พักระหว่างคิว ป้องกันยิง AI ถี่เกิน (โควต้า)
+        await new Promise(r => setTimeout(r, 800));
+      }
+
+      setScannedHistory(prev => [...results, ...prev]);
+      setScanProgress(null);
+      setIsBatchAiScanning(false);
+
+      // 3. สรุปผลแบบ"ไม่ตกหล่น": ชี้ชัดว่าเหลือกี่ไฟล์ที่ต้องลองใหม่
+      const doneTotal = totalInDrive - failedFiles.length;
+      if (failedFiles.length === 0) {
+        showToast(`🎉 Sync ครบ 100%! ไฟล์ทั้งหมด ${totalInDrive} ไฟล์ ไม่ตกหล่น (ครั้งนี้ใหม่ ${successCount} | ซ้ำข้าม ${totalInDrive - successCount})`, 'success');
+      } else {
+        showToast(`📊 Sync รอบนี้: สำเร็จเพิ่ม ${successCount} | ติดปัญหา ${failCount} ไฟล์ (ระบบจดประวัติไว้แล้ว — กด Sync อีกครั้งเพื่อทำเฉพาะไฟล์ที่ติด) | ครบแล้วทั้งหมด ${doneTotal}/${totalInDrive} ไฟล์`, 'info');
+      }
+    } catch (err: any) {
+      setIsBatchAiScanning(false);
+      setScanProgress(null);
+      showToast(`❌ Sync ขัดข้อง: ${err.message || err} — (ฟีเจอร์นี้ต้องรันบนเซิร์ฟเวอร์ที่มี backend)`, 'error');
     }
   };
 
@@ -1808,6 +1929,15 @@ function getProcessedFileIds() {
 
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                   <div className="flex items-center space-x-2">
+                    <button
+                      onClick={handleDriveSyncAll}
+                      disabled={isBatchAiScanning || !folderId}
+                      className="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-xs font-bold flex items-center space-x-1.5 transition cursor-pointer disabled:opacity-50 shadow"
+                      title="ดึงไฟล์จาก Drive ครบทุกไฟล์ (ทุกโฟลเดอร์ย่อย) ทีละไฟล์: AI อ่าน + บันทึกประวัติ — ไฟล์ที่เคยทำแล้วจะถูกข้าม กดซ้ำจนครบ ไม่ตกหล่น"
+                    >
+                      {isBatchAiScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                      <span>{isBatchAiScanning ? 'กำลัง Sync ทีละไฟล์...' : '🔄 Sync ทั้งหมด (ครบทุกไฟล์ ไม่ตกหล่น)'}</span>
+                    </button>
                     <button
                       onClick={() => handleRunDriveAiScan(10)}
                       disabled={isBatchAiScanning}

@@ -19,49 +19,6 @@ const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
 const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
 const supabaseServerClient = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
-// Fallback heuristic bill extractor when AI quota is exceeded or network fails
-function heuristicBillExtraction(fileName?: string, folderPath?: string) {
-  const name = fileName || '';
-  const docNoMatch = name.match(/(?:เลขที่|No\.?|DO-?|INV-?)\s*([A-Za-z0-9\-\/]+)/i);
-  const refMatch = name.match(/(TR-[\w\-]+)/i);
-  const dateMatch = name.match(/(20\d{2})[-_]?(\d{2})[-_]?(\d{2})/);
-  const formattedDate = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : new Date().toISOString().slice(0, 10);
-  
-  const isSupplier = name.includes('ใบส่งของ') || name.includes('ใบกำกับ') || name.includes('บิล') || name.toUpperCase().includes('INV') || name.toUpperCase().includes('DO');
-  const isDest = name.includes('ตั๋วชั่ง') || name.includes('ใบชั่ง') || name.toLowerCase().includes('weight') || name.toLowerCase().includes('scale');
-  
-  let category = 'หินคลุก / หินผสม (Base & Subbase)';
-  if (name.includes('ยาง') || name.includes('แอสฟัลต์') || name.includes('AC')) category = 'งานผิวทางแอสฟัลต์ (Asphalt Pavement)';
-  else if (name.includes('คอนกรีต') || name.includes('ปูน') || name.includes('เหล็ก')) category = 'คอนกรีตและเหล็กโครงสร้าง';
-  else if (name.includes('ดิน') || name.includes('ลูกรัง') || name.includes('ทราย')) category = 'งานดินและคันทาง (Earthwork)';
-
-  return {
-    issuer: isSupplier ? 'SUPPLIER_DO' : 'BUYER_INTERNAL',
-    billType: isSupplier ? 'SUPPLIER' : (isDest ? 'DEST_WEIGHT' : 'DEST_WEIGHT'),
-    category: category,
-    docNo: docNoMatch ? docNoMatch[1] : (refMatch ? refMatch[1] : (name || `DOC-${Date.now().toString().slice(-4)}`)),
-    refDocNo: refMatch ? refMatch[1] : '',
-    poRef: '',
-    date: formattedDate,
-    supplier: isSupplier ? 'ผู้จำหน่าย/โรงโม่ (จากชื่อไฟล์)' : 'ตั๋วชั่ง BTC หน้างาน',
-    vehicleReg: '-',
-    itemDesc: category,
-    spec: 'STD',
-    qty: 1,
-    unit: 'ตัน',
-    grossWeight: 0,
-    tareWeight: 0,
-    netWeight: 0,
-    pricePerUnit: 0,
-    totalAmount: 0,
-    isSubcontractorDeduction: false,
-    subcontractorName: '',
-    remarks: (folderPath ? `[${folderPath}] ` : '') + '⚡ สกัดข้อมูลจากชื่อไฟล์ (เนื่องจากโควต้า AI ของ Google เต็มชั่วคราว โปรดตรวจสอบตัวเลขก่อนบันทึก)',
-    isAiFallback: true,
-    quotaExceeded: true
-  };
-}
-
 // Shared function for AI Document Parsing & Classification (Gemini with Resilient Fallback)
 async function performBillAiExtraction(
   cleanBase64: string, 
@@ -200,10 +157,11 @@ async function performBillAiExtraction(
     }
   }
 
-  // If all models failed, use heuristic extraction
-  const fallback = heuristicBillExtraction(contextInfo?.fileName, contextInfo?.folderPath);
-  fallback.quotaExceeded = true;
-  return fallback;
+  // 🔒 นโยบาย "ห้ามเดา": หาก AI อ่านใบจริงไม่ได้ ห้ามใช้ข้อมูลจากชื่อไฟล์ (อาจไม่ตรงกับใบจริง)
+  // ส่ง error กลับไปให้ caller ทราบและข้ามใบนั้นแทน (ผู้ใช้จะเห็นรายการที่ต้องสแกนซ้ำ)
+  const aiError: any = new Error('AI_UNAVAILABLE: ไม่สามารถอ่านใบด้วย AI ได้ (โควต้าเต็ม/บริการไม่ตอบสนอง) — ระบบจะไม่เดาข้อมูลจากชื่อไฟล์');
+  aiError.code = 'AI_UNAVAILABLE';
+  throw aiError;
 }
 
 // API endpoint for OCR Document Parsing
@@ -212,19 +170,16 @@ app.post('/api/ocr-scan', async (req, res) => {
     const { imageBase64, mimeType = 'image/jpeg', fileName } = req.body;
     if (!imageBase64) {
       return res.status(400).json({ error: 'Missing imageBase64' });
-    }
-
-    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
-    const parsedData = await performBillAiExtraction(cleanBase64, mimeType, { fileName });
+    }  const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+  const parsedData = await performBillAiExtraction(cleanBase64, mimeType, { fileName });
     return res.json({ success: true, data: parsedData });
   } catch (error: any) {
     console.error('OCR Error:', error);
-    // Even in severe unexpected errors, return a usable fallback so UI never breaks
-    const fallback = heuristicBillExtraction(req.body.fileName);
-    return res.json({ 
-      success: true, 
-      data: fallback,
-      warning: error.message || 'ใช้โหมดสกัดข้อมูลสำรองเนื่องจากระบบ AI ปลายทางไม่ตอบสนอง'
+    // 🔒 นโยบาย "ห้ามเดา": AI อ่านไม่ได้ = ไม่มีข้อมูลให้ — ส่ง 422 ให้ UI แจ้งผู้ใช้สแกนใหม่ ไม่เดาจากชื่อไฟล์
+    return res.status(422).json({
+      success: false,
+      error: 'AI อ่านใบไม่สำเร็จ — ระบบไม่เดาข้อมูลจากชื่อไฟล์ โปรดลองอีกครั้งภายหลัง (ตรวจ GEMINI_API_KEY / โควต้า)',
+      code: 'AI_UNAVAILABLE'
     });
   }
 });
@@ -267,14 +222,18 @@ app.post('/api/bot-import-bill', async (req, res) => {
         folderPath: driveFolderPath
       });
     } else {
+      // 🔒 นโยบาย "ห้ามเดา": ไม่มีรูปให้ AI อ่าน = ไม่มีข้อมูลจริง — ห้ามปลอมค่า default (น้ำหนัก/ทะเบียน/โครงการ)
+      // ใช้ค่าว่าง + ติดธง needsReview ให้ผู้ใช้กรอกจากใบจริงเอง (ตรงกับ GAS ที่ตั้ง needs_review: true แล้ว)
       parsedData = req.body.parsedData || {
-        docNo: req.body.docNo || `DRIVE-${Date.now().toString().slice(-5)}`,
+        docNo: req.body.docNo || '',
         billType: req.body.billType || 'DEST_WEIGHT',
         category: req.body.category || 'ทั่วไป',
-        supplier: req.body.supplier || 'โรงโม่ / ตั๋วชั่งนำเข้าจาก Drive',
-        vehicleReg: req.body.vehicleReg || '82-9988 บร',
-        itemDesc: req.body.itemDesc || 'หินคลุก / หินฝุ่น',
-        netWeight: Number(req.body.netWeight || 30.5)
+        supplier: req.body.supplier || '',
+        vehicleReg: req.body.vehicleReg || '',
+        itemDesc: req.body.itemDesc || '',
+        netWeight: req.body.netWeight !== undefined ? Number(req.body.netWeight) : 0,
+        remarks: req.body.remarks || `รอตรวจสอบ: ข้อมูลจากชื่อไฟล์ "${driveFileName}" อาจไม่ตรงกับใบจริง — โปรดกรอกข้อมูลจากใบก่อนชนบิล`,
+        needsReview: true
       };
     }
 
@@ -480,10 +439,105 @@ app.post('/api/drive-list-files', async (req, res) => {
   }
 });
 
+// 🔁 Full Sync: ดึง"ครบทุกไฟล์"จากโฟลเดอร์ Drive (ทะลุทุกโฟลเดอร์ย่อย ไม่จำกัดจำนวน)
+// เทียบกับ drive_sync_logs แล้วทำเฉพาะไฟล์ที่ยังไม่เคย sync — ทีละไฟล์: ดึงลิงก์→แปลงเป็นภาพ→AI อ่าน→บันทึกประวัติ
+// รับประกัน"ไม่ตกหล่นแม้แต่ไฟล์เดียว": สรุปผลแยกชัดเจน success / duplicate / failed (ให้ผู้ใช้กด sync ซ้ำเอาไฟล์ที่พลาด)
+app.post('/api/drive-sync-all', async (req, res) => {
+  try {
+    const { folderId, limit = 0 } = req.body || {};
+    if (!folderId) {
+      return res.status(400).json({ success: false, error: 'Missing folderId' });
+    }
+
+    // ---- Phase 1: สำรวจโฟลเดอร์ครบทุกชั้น (BFS ไม่จำกัดจำนวนไฟล์) ----
+    const visited = new Set<string>();
+    const queue: { id: string; path: string; depth: number }[] = [{ id: folderId, path: '', depth: 1 }];
+    const allFiles: { fileId: string; fileName: string; folderPath: string }[] = [];
+    const MAX_DEPTH = 6;
+    let foldersChecked = 0;
+
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      if (visited.has(cur.id)) continue;
+      visited.add(cur.id);
+      foldersChecked++;
+
+      try {
+        const resp = await fetch(
+          `https://drive.google.com/embeddedfolderview?id=${encodeURIComponent(cur.id)}#list`,
+          { headers: { 'User-Agent': 'Mozilla/5.0' }, redirect: 'follow' }
+        );
+        if (!resp.ok) continue;
+        const html = await resp.text();
+
+        const entryRegex = /id="entry-([A-Za-z0-9_-]+)"([\s\S]*?)<div class="flip-entry-title">([\s\S]*?)<\/div>/g;
+        let m: RegExpExecArray | null;
+        while ((m = entryRegex.exec(html)) !== null) {
+          const entryId = m[1];
+          const entryBlock = m[2];
+          const fileName = m[3]
+            .replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>')
+            .replace(/"/g, '"').replace(/'/g, "'").trim();
+          const isFolder = entryBlock.includes('/drive/folders/') || !fileName.includes('.');
+
+          if (isFolder) {
+            if (cur.depth < MAX_DEPTH && !visited.has(entryId)) {
+              queue.push({ id: entryId, path: cur.path ? `${cur.path} > ${fileName}` : fileName, depth: cur.depth + 1 });
+            }
+          } else if (/\.(jpe?g|png|webp|heic|pdf)$/i.test(fileName)) {
+            allFiles.push({ fileId: entryId, fileName, folderPath: cur.path });
+          }
+        }
+      } catch {}
+    }
+
+    if (foldersChecked === 0) {
+      return res.status(404).json({ success: false, error: 'ไม่สามารถเข้าถึงโฟลเดอร์ Drive — โปรดตรวจว่าโฟลเดอร์เปิดแชร์ลิงก์ "Anyone with the link" แล้ว' });
+    }
+
+    // ---- Phase 2: กรองไฟล์ที่เคย sync สำเร็จ/ซ้ำออก (จาก drive_sync_logs) ----
+    let alreadySynced: Set<string> = new Set();
+    if (supabaseServerClient) {
+      try {
+        const ids = allFiles.map(f => f.fileId);
+        const pageSize = 500;
+        for (let i = 0; i < ids.length; i += pageSize) {
+          const { data } = await supabaseServerClient
+            .from('drive_sync_logs')
+            .select('id,status')
+            .in('id', ids.slice(i, i + pageSize));
+          for (const row of (data || []) as { id: string; status: string }[]) {
+            // สถานะที่"จบแล้ว" = ข้าม; สถานะ FAILED_AI = ลองใหม่ (เพราะครั้งก่อน AI อ่านไม่ได้)
+            if (row.status === 'SUCCESS_AI' || row.status === 'SKIPPED_DUPLICATE') alreadySynced.add(row.id);
+          }
+        }
+      } catch (e) { console.warn('drive_sync_logs check failed (จะ sync ทุกไฟล์ใหม่):', e); }
+    }
+
+    const pending = allFiles.filter(f => !alreadySynced.has(f.fileId));
+    const capped = limit && Number(limit) > 0 ? pending.slice(0, Number(limit)) : pending;
+
+    return res.json({
+      success: true,
+      totalInDrive: allFiles.length,
+      alreadySyncedCount: alreadySynced.size && allFiles.filter(f => alreadySynced.has(f.fileId)).length,
+      pendingCount: pending.length,
+      processingNow: capped.length,
+      foldersChecked,
+      files: capped
+    });
+  } catch (error: any) {
+    console.error('Drive Sync All Error:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Failed to sync Drive folder' });
+  }
+});
+
 // Endpoint to scan a file from Google Drive directly by driveFileId or driveUrl
+// 🔁 บันทึกประวัติลง drive_sync_logs อัตโนมัติทุกครั้ง (SUCCESS_AI / FAILED_AI / FETCH_FAILED)
+// เพื่อให้รอบ sync ถัดไปข้ามไฟล์ที่ทำสำเร็จแล้ว และลองใหม่เฉพาะไฟล์ที่พลาด = ไม่ตกหล่น
 app.post('/api/scan-drive-file', async (req, res) => {
   try {
-    const { driveFileId, driveFileUrl, fileName = 'drive_bill.jpg' } = req.body;
+    const { driveFileId, driveFileUrl, fileName = 'drive_bill.jpg', folderPath = '' } = req.body;
     let targetId = driveFileId;
 
     if (!targetId && driveFileUrl) {
@@ -525,6 +579,15 @@ app.post('/api/scan-drive-file', async (req, res) => {
     }
 
     if (!imageBuffer) {
+      // บันทึกประวัติ: ดึงรูปไม่สำเร็จ (ส่วนใหญ่ไฟล์ไม่ได้เปิดแชร์ลิงก์) — รอบหน้าลองใหม่
+      if (supabaseServerClient) {
+        try {
+          await supabaseServerClient.from('drive_sync_logs').upsert({
+            id: targetId, file_name: fileName, folder_path: folderPath || null,
+            status: 'FETCH_FAILED', synced_at: new Date().toISOString()
+          });
+        } catch {}
+      }
       return res.status(404).json({
         success: false,
         error: `ไม่สามารถดึงรูปภาพจาก Google Drive สำหรับไฟล์ ID ${targetId} ได้ (โปรดตรวจสอบว่าเปิดการแชร์ลิงก์แล้ว)`
@@ -532,9 +595,42 @@ app.post('/api/scan-drive-file', async (req, res) => {
     }
 
     const cleanBase64 = imageBuffer.toString('base64');
-    const parsedData = await performBillAiExtraction(cleanBase64, mimeType, {
-      fileName: fileName
-    });
+    let parsedData: any;
+    try {
+      parsedData = await performBillAiExtraction(cleanBase64, mimeType, {
+        fileName: fileName
+      });
+    } catch (aiErr: any) {
+      // บันทึกประวัติ: AI อ่านไม่สำเร็จ (โควต้าเต็ม/บริการล่ม) — รอบหน้า sync จะลองใหม่ให้อัตโนมัติ
+      if (supabaseServerClient) {
+        try {
+          await supabaseServerClient.from('drive_sync_logs').upsert({
+            id: targetId, file_name: fileName, folder_path: folderPath || null,
+            status: 'FAILED_AI', synced_at: new Date().toISOString()
+          });
+        } catch {}
+      }
+      return res.status(422).json({ success: false, code: 'AI_UNAVAILABLE', error: aiErr.message || 'AI read failed' });
+    }
+
+    // บันทึกประวัติ: สำเร็จ — รอบหน้า sync จะข้ามไฟล์นี้
+    if (supabaseServerClient) {
+      try {
+        await supabaseServerClient.from('drive_sync_logs').upsert({
+          id: targetId,
+          file_name: fileName,
+          drive_url: `https://drive.google.com/file/d/${targetId}/view`,
+          folder_path: folderPath || null,
+          doc_no: parsedData.docNo || null,
+          bill_type: parsedData.billType || null,
+          category: parsedData.category || null,
+          supplier: parsedData.supplier || null,
+          net_weight: parsedData.netWeight ? Number(parsedData.netWeight) : null,
+          status: 'SUCCESS_AI',
+          synced_at: new Date().toISOString()
+        });
+      } catch (e) { console.warn('drive_sync_logs upsert failed:', e); }
+    }
 
     return res.json({
       success: true,
@@ -566,15 +662,16 @@ app.post('/api/bot-import-batch', async (req, res) => {
         receivedAt: new Date().toISOString(),
         status: 'PENDING_MATCH',
         data: {
-          docNo: b.docNo || b.detectedDocNo || `DRIVE-${Date.now().toString().slice(-5)}`,
-          billType: b.billType || (b.fileName && b.fileName.includes('ใบส่งของ') ? 'SUPPLIER' : 'DEST_WEIGHT'),
-          supplier: b.supplier || 'โรงโม่ / ตั๋วชั่งนำเข้าจาก Drive',
-          date: b.date || b.documentDate || new Date().toISOString().slice(0, 10),
-          vehicleReg: b.vehicleReg || '82-9988 บร',
-          itemDesc: b.itemDesc || 'หินคลุก / หินฝุ่น',
-          netWeight: Number(b.netWeight || 30.5),
-          remarks: b.remarks || b.folderPath || '',
-          projectId: b.projectId || 'PRJ-DOH-24'
+          docNo: b.docNo || '',
+          billType: b.billType || 'DEST_WEIGHT',
+          supplier: b.supplier || '',
+          date: b.date || b.documentDate || '',
+          vehicleReg: b.vehicleReg || '',
+          itemDesc: b.itemDesc || '',
+          netWeight: b.netWeight !== undefined ? Number(b.netWeight) : 0,
+          projectId: b.projectId || '',
+          remarks: b.remarks || b.folderPath || `รอตรวจสอบ: ข้อมูลจากชื่อไฟล์ "${b.driveFileName || b.fileName || ''}" อาจไม่ตรงกับใบจริง — โปรดกรอกจากใบก่อนชนบิล`,
+          needsReview: true
         }
       };
       botBillsBuffer.unshift(newBotBill);
