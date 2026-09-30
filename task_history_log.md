@@ -5,6 +5,18 @@
 
 ---
 
+## [2026-09-29] รอบที่ 30 — ตั้ง GitHub Actions auto-deploy สำเร็จ — เว็บขึ้นสมบูรณ์ (จบปัญหาหน้าขาว)
+
+- **ผู้ดำเนินการ:** Buffy (AI / Senior Architect) — ผู้ใช้สั่ง "ทำให้เลย" และแจ้งว่าใช้ GitHub หลาย ID
+- **สาเหตุที่ยัง 404:** Source ถูกเปลี่ยนเป็น GitHub Actions แล้ว แต่ repo ยังไม่มีไฟล์ workflow → ตัว deploy เก่าจากระบบ branch (ซอร์สดิบ) ยังแสดงอยู่
+- **สิ่งที่ทำ:**
+  1. `git init` + เชื่อม remote `buriramthongchaicoltd/Billing-system` + fetch/reset กับ origin/main (เก็บประวัติเดิม)
+  2. Commit: เพิ่ม `.github/workflows/deploy.yml` + `.gitignore` + `.env.example`, ลบ `dev-server.log` + dist รุ่นเก่า (2 ไฟล์ assets) ออกจาก repo
+  3. แก้ branch master → main (`git branch -M main`) แล้ว **push สำเร็จ** (e2279d1..5b286e3)
+  4. **พิสูจน์ผลจาก API จริง:** workflow "Deploy to GitHub Pages" conclusion: success + หน้าเว็บ live อ้าง `./assets/index-Bgb20jJy.js` (ตัว build) → JS 725KB / CSS 59KB ได้ HTTP 200 ทั้งคู่ ✅
+- **เรื่อง multi-ID:** เครื่องเก็บ credential ของ `btcbrhr-rgb` (git identity: btcbr.hr@gmail.com) — push ด้วย ID นี้ซึ่งมีสิทธิ์ใน repo (พิสูจน์แล้วผ่าน) หากต้อง push ด้วย buriramthongchaicoltd ต้องตั้ง credential แยกตาม repo
+- **ข้อสรุประบบ deploy:** จากนี้แก้โค้ด → push ซอร์ส → GitHub build + deploy เอง ~2 นาที ไม่ต้องอัปโหลด dist มืออีก
+
 ## [2026-09-29] รอบที่ 29 — ลบโฟลเดอร์ github-upload ทิ้ง (ซ้ำซ้อนกับ dist)
 
 - **ผู้ดำเนินการ:** Buffy (AI / Senior Architect) — ผู้ใช้ชี้ว่า github-upload ซ้ำกับ dist โดยไม่จำเป็น
