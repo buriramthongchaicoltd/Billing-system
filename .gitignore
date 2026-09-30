@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output (GitHub Actions จะ build ให้เอง)
+dist/
+*.tsbuildinfo
+
+# Environment / secrets (ห้าม push ขึ้น GitHub เด็ดขาด)
+.env
+.env.local
+.env.*.local
+
+# Logs
+dev-server.log
+*.log
+npm-debug.log*
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Freebuff workspace meta
+.freebuff/
