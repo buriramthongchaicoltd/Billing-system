@@ -1823,60 +1823,28 @@ function getProcessedFileIds() {
                 </button>
               </div>
 
-              {/* 3 Step Visual Guide */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                  <div className="flex items-center space-x-1.5 text-blue-800 font-bold">
-                    <span className="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">1</span>
-                    <span>เปิด Apps Script ใน Gmail</span>
-                  </div>
-                  <p className="text-slate-600 text-[11px]">
-                    เปิด <a href="https://script.google.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">script.google.com</a> ด้วยบัญชีที่มีโฟลเดอร์ &gt; กด "โครงการใหม่"
-                  </p>
-                </div>
-
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                  <div className="flex items-center space-x-1.5 text-blue-800 font-bold">
-                    <span className="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">2</span>
-                    <span>วางโค้ดสคริปต์</span>
-                  </div>
-                  <p className="text-slate-600 text-[11px]">
-                    กดปุ่ม <strong className="text-blue-900">"คัดลอกโค้ดทั้งหมด"</strong> ด้านล่าง วางแทนโค้ดเดิมในหน้าต่างแล้วกดบันทึก (Ctrl+S)
-                  </p>
-                </div>
-
-                <div className="p-3 bg-emerald-50 border-2 border-emerald-400 rounded-xl space-y-1 shadow-xs">
-                  <div className="flex items-center space-x-1.5 text-emerald-900 font-bold">
-                    <span className="w-5 h-5 rounded-full bg-emerald-600 text-white flex items-center justify-center text-[10px]">3</span>
-                    <span>กดเรียกใช้ "syncAllInBatchesDirectly"</span>
-                  </div>
-                  <p className="text-emerald-900 text-[11px] leading-relaxed">
-                    เลือกฟังก์ชัน <strong className="font-mono bg-emerald-200/90 px-1.5 py-0.5 rounded text-emerald-950 font-bold">syncAllInBatchesDirectly</strong> (รวบส่งเป็นชุด 50 บิล เข้า Supabase ทันที 576 บิล เสร็จใน ~15 วินาที!) แล้วกด <strong>"เรียกใช้ (Run)"</strong>
-                  </p>
-                </div>
+              {/* สรุป 3 ขั้นตอนติดตั้ง (สั้น) */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-[11px] text-slate-700 flex flex-wrap items-center gap-x-2 gap-y-1">
+                <strong className="text-slate-900">วิธีติดตั้ง:</strong>
+                <span>1) เปิด <a href="https://script.google.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">script.google.com</a> ด้วยบัญชีที่มีโฟลเดอร์ → โครงการใหม่</span>
+                <span className="text-slate-300">|</span>
+                <span>2) กด "คัดลอกโค้ดทั้งหมด" ด้านล่าง → วางแทนโค้ดเดิม → บันทึก (Ctrl+S)</span>
+                <span className="text-slate-300">|</span>
+                <span>3) เลือกฟังก์ชัน <code className="font-mono bg-emerald-100 px-1 rounded font-bold text-emerald-900">syncAllInBatchesDirectly</code> → Run</span>
               </div>
 
-              {/* Clarity Box: Why no AI scan per bill needed */}
-              <div className="bg-amber-50/90 border border-amber-200 p-3.5 rounded-xl space-y-1.5 text-[11px] text-amber-950">
-                <div className="flex items-center space-x-2 font-bold text-amber-900">
-                  <span className="px-1.5 py-0.5 bg-amber-200 rounded text-amber-900 font-mono text-[10px]">💡 ข้อควรรู้</span>
-                  <span>ทำไมไม่ต้องส่งทีละบิล และไม่ต้องรอ AI อ่านทีละรูป?</span>
+              {/* ⚠️ คำเตือนสำคัญ: สคริปต์ GAS บันทึกจากชื่อไฟล์ = ต้องตรวจกับใบจริง */}
+              <div className="bg-rose-50 border border-rose-300 p-3.5 rounded-xl space-y-1.5 text-[11px] text-rose-950">
+                <div className="flex items-center space-x-2 font-bold text-rose-900">
+                  <span className="px-1.5 py-0.5 bg-rose-200 rounded text-rose-900 font-mono text-[10px]">⚠️ สำคัญ</span>
+                  <span>สคริปต์นี้อ่านข้อมูลจาก "ชื่อไฟล์" เท่านั้น — ไม่ได้ให้ AI อ่านใบจริง</span>
                 </div>
-                <p className="text-amber-900 leading-relaxed">
-                  เนื่องจากชื่อไฟล์บิลใน Google Drive (เช่น <code className="bg-amber-100 font-mono px-1 rounded text-amber-950">TR-202609-00568_ใบส่งของ เลขที่ 1264008895_20260928_150435.jpg</code>) 
-                  มีข้อมูลครบถ้วนอยู่แล้วทั้ง <strong>เลขที่ตั๋วชั่ง, เลขที่บิล, วันที่, หมวดหมู่วัสดุ</strong> ระบบจึงอ่านข้อมูลและรวบส่งเป็นชุดเข้าฐานข้อมูล Supabase ได้ทันทีใน 0.001 วินาทีต่อบิล ไม่ต้องเสียเวลาแปลงไฟล์ภาพส่ง AI ทีละรูปให้ช้าและติดขีดจำกัดเวลา
+                <p className="text-rose-900 leading-relaxed">
+                  ข้อมูลที่สคริปต์นี้ส่งเข้า Supabase มาจากชื่อไฟล์ (เช่น <code className="bg-rose-100 font-mono px-1 rounded">TR-202609-00568_ใบส่งของ เลขที่ 1264008895_...jpg</code>) ซึ่ง<strong>อาจไม่ตรงกับใบจริง</strong> — ทุกรายการจะติดธง <strong>"รอตรวจสอบ"</strong> ให้คุณเช็กกับใบจริงและแก้ไขก่อนชนบิลเสมอ
+                  หากต้องการให้ AI อ่านตัวเลขจากใบจริง ให้ใช้ปุ่ม <strong>"🔄 Sync ทั้งหมด"</strong> ในแท็บ 1 แทน
                 </p>
               </div>
 
-              {/* History Tracking Sheet Callout */}
-              <div className="bg-blue-50/70 border border-blue-200 p-3 rounded-xl flex items-start space-x-2 text-[11px] text-blue-900">
-                <CheckCircle2 className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
-                <div>
-                  <strong>ระบบบันทึกประวัติอัตโนมัติ (Zero Duplicate & No Data Loss):</strong> สคริปต์จะสร้าง Google Sheet ประวัติชื่อ <code className="bg-blue-100 px-1.5 py-0.5 rounded text-blue-950 font-bold">BTC_Drive_Sync_Log</code> ให้ใน Drive ของคุณอัตโนมัติ เพื่อจดจำ ID ไฟล์ที่เคยส่งแล้ว 100% จึงไม่มีการส่งซ้ำเด็ดขาด และหากเน็ตหลุดหรือมีไฟล์ส่งไม่สำเร็จ ระบบจะไม่บันทึกประวัติและจะลองส่งใหม่ในรอบถัดไปแบบอัตโนมัติ
-                </div>
-              </div>
-
-              {/* Script Box */}
               <div>
                 <div className="flex justify-between items-center mb-1">
                   <label className="font-bold text-slate-800 flex items-center gap-1.5">
@@ -1912,7 +1880,7 @@ function getProcessedFileIds() {
                   <div className="text-center py-6 border border-dashed border-slate-300 rounded-xl bg-slate-50 text-slate-500">
                     <p className="font-semibold">ยังไม่มีบิลส่งเข้ามาในขณะนี้</p>
                     <p className="text-[11px] text-slate-400 mt-1">
-                      สามารถกดปุ่ม <strong className="text-blue-700">"⚡ ทดสอบดึงบิลจาก Drive เข้ามา"</strong> ด้านบน เพื่อดูตัวอย่างการทำงานได้ทันที
+                      เมื่อสคริปต์ด้านบนทำงาน (หรือกด Sync ทั้งหมดในแท็บ 1) บิลจะปรากฏที่นี่อัตโนมัติ
                     </p>
                   </div>
                 ) : (
@@ -1967,19 +1935,11 @@ function getProcessedFileIds() {
           {/* TAB 2: SUPABASE CLOUD REALTIME */}
           {activeTab === 'supabase' && (
             <div className="space-y-4">
-              <div className="bg-teal-50 border border-teal-200 p-4 rounded-xl space-y-2">
-                <div className="flex items-center justify-between">
-                  <h4 className="font-bold text-teal-950 text-sm flex items-center gap-1.5">
-                    <Database className="w-4 h-4 text-teal-700" />
-                    <span>เชื่อมต่อ Supabase Cloud (ศูนย์ควบคุมฐานข้อมูลหลัก)</span>
-                  </h4>
-                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-teal-200 text-teal-900 border border-teal-300">
-                    จุดกรอกหลัก (แนะนำ)
-                  </span>
-                </div>
-                <p className="text-teal-900 text-xs leading-relaxed">
-                  กรอกข้อมูล Supabase ที่นี่เพียงครั้งเดียว ระบบจะบันทึกและ <strong>นำค่า URL กับ Key ไปฝังในโค้ดสคริปต์ Google Apps Script (ในแท็บ 2) ให้อัตโนมัติทันที</strong> เพื่อให้คุณก๊อปปี้สคริปต์ไปวางแล้วเริ่มทำงานได้เลยโดยไม่ต้องแก้โค้ดเองครับ
-                </p>
+              <div className="bg-teal-50 border border-teal-200 p-3 rounded-xl text-xs text-teal-950 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="font-bold flex items-center gap-1.5">
+                  <Database className="w-4 h-4 text-teal-700" />
+                  ตั้งค่า Supabase Cloud (ครั้งเดียว — ค่าที่กรอกจะถูกฝังในสคริปต์แท็บ 2 ให้อัตโนมัติ)
+                </span>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -2034,23 +1994,6 @@ function getProcessedFileIds() {
                     <span>ทดสอบการเชื่อมต่อ & บันทึกค่า</span>
                   </button>
                 </div>
-              </div>
-
-              {/* Cross-tab Guide Banner */}
-              <div className="bg-slate-100 border border-slate-300 rounded-xl p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs">
-                <div className="flex items-center space-x-2 text-slate-700">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
-                  <span>
-                    เมื่อทดสอบการเชื่อมต่อผ่านแล้ว 👉 สามารถกดสลับไปที่ <strong>แท็บ 2</strong> เพื่อก๊อปปี้สคริปต์ Google Drive ไปติดตั้งได้ทันทีครับ
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('drive_script')}
-                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition cursor-pointer shrink-0 shadow-2xs"
-                >
-                  👉 ไปแท็บ 2 ก๊อปปี้สคริปต์
-                </button>
               </div>
 
               {supabaseStatusMsg && (
