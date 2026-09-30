@@ -372,73 +372,6 @@ app.post('/api/bot-import-bill', async (req, res) => {
   }
 });
 
-// Endpoint: ดึง"รายชื่อไฟล์จริง"จากโฟลเดอร์ Google Drive (โฟลเดอร์ต้องเปิดแชร์ลิงก์ Anyone with the link)
-// ใช้ Drive public embeddedfolderview — ไม่ต้องมี Google API Key (เข้าถึงได้เฉพาะไฟล์/โฟลเดอร์ที่แชร์ลิงก์สาธารณะเท่านั้น)
-// สำรวจ"ทะลุโฟลเดอร์ย่อยทุกชั้น" (BFS + visited set กันวงวน ตรงกับ logic getFilesRecursive ของ GAS)
-app.post('/api/drive-list-files', async (req, res) => {
-  try {
-    const { folderId, limit = 20 } = req.body || {};
-    if (!folderId) {
-      return res.status(400).json({ success: false, error: 'Missing folderId' });
-    }
-
-    const maxFetch = Number(limit || 20);
-    const visited = new Set<string>();
-    const queue: { id: string; path: string; depth: number }[] = [{ id: folderId, path: '', depth: 1 }];
-    const billFiles: { fileId: string; fileName: string; folderPath: string }[] = [];
-    const MAX_FOLDERS = 50;   // กันยิง Drive ถี่เกิน (แต่ละโฟลเดอร์ = 1 request)
-    const MAX_DEPTH = 6;      // กันโครงสร้างลึกผิดปกติ
-    let foldersChecked = 0;
-
-    while (queue.length > 0 && billFiles.length < maxFetch && foldersChecked < MAX_FOLDERS) {
-      const cur = queue.shift()!;
-      if (visited.has(cur.id)) continue;
-      visited.add(cur.id);
-      foldersChecked++;
-
-      const resp = await fetch(
-        `https://drive.google.com/embeddedfolderview?id=${encodeURIComponent(cur.id)}#list`,
-        { headers: { 'User-Agent': 'Mozilla/5.0' }, redirect: 'follow' }
-      );
-      if (!resp.ok) continue;
-      const html = await resp.text();
-
-      // แต่ละ entry: id="entry-<id>" ... ชื่อใน div.flip-entry-title ... ถ้าเป็น"โฟลเดอร์"จะมีลิงก์ /drive/folders/<id>
-      const entryRegex = /id="entry-([A-Za-z0-9_-]+)"([\s\S]*?)<div class="flip-entry-title">([\s\S]*?)<\/div>/g;
-      let m: RegExpExecArray | null;
-      while ((m = entryRegex.exec(html)) !== null) {
-        const entryId = m[1];
-        const entryBlock = m[2];
-        const fileName = m[3]
-          .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
-        const isFolder = entryBlock.includes('/drive/folders/') || !fileName.includes('.');
-
-        if (isFolder) {
-          if (cur.depth < MAX_DEPTH && !visited.has(entryId)) {
-            queue.push({ id: entryId, path: cur.path ? `${cur.path} > ${fileName}` : fileName, depth: cur.depth + 1 });
-          }
-        } else if (/\.(jpe?g|png|webp|heic|pdf)$/i.test(fileName)) {
-          billFiles.push({ fileId: entryId, fileName, folderPath: cur.path });
-          if (billFiles.length >= maxFetch) break;
-        }
-      }
-    }
-
-    if (foldersChecked === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'ไม่สามารถเข้าถึงโฟลเดอร์ Drive — โปรดตรวจว่าโฟลเดอร์เปิดแชร์ลิงก์ "Anyone with the link" แล้ว'
-      });
-    }
-
-    return res.json({ success: true, count: billFiles.length, foldersChecked, files: billFiles });
-  } catch (error: any) {
-    console.error('Drive list files Error:', error);
-    return res.status(500).json({ success: false, error: error.message || 'Failed to list Drive folder' });
-  }
-});
-
 // 🔁 Full Sync: ดึง"ครบทุกไฟล์"จากโฟลเดอร์ Drive (ทะลุทุกโฟลเดอร์ย่อย ไม่จำกัดจำนวน)
 // เทียบกับ drive_sync_logs แล้วทำเฉพาะไฟล์ที่ยังไม่เคย sync — ทีละไฟล์: ดึงลิงก์→แปลงเป็นภาพ→AI อ่าน→บันทึกประวัติ
 // รับประกัน"ไม่ตกหล่นแม้แต่ไฟล์เดียว": สรุปผลแยกชัดเจน success / duplicate / failed (ให้ผู้ใช้กด sync ซ้ำเอาไฟล์ที่พลาด)
@@ -704,57 +637,6 @@ app.post('/api/bot-bills/ack', (req, res) => {
     botBillsBuffer.length = 0;
   }
   return res.json({ success: true });
-});
-
-// Simulate incoming bot push from Google Drive folder 1Z6-WNDovLWEYQsYllTTPCDLIwQt3ufjx
-app.post('/api/simulate-bot-push', (req, res) => {
-  const mockTickets = [
-    {
-      docNo: '690920/00088',
-      billType: 'DEST_WEIGHT',
-      supplier: 'บจก. บุรีรัมย์ธงชัยก่อสร้าง (ตาชั่งหน้างาน)',
-      vehicleReg: '82-9988 บร',
-      itemDesc: 'หินคลุก ชั่งหน้างาน ทล.24',
-      grossWeight: 44850,
-      tareWeight: 14220,
-      netWeight: 30.63,
-      isSubcontractorDeduction: false,
-      remarks: 'ตรวจรับเข้าหน้างาน ทล.24 ตอน 2 อ้างอิง DO 690920/00030'
-    },
-    {
-      docNo: 'DO-BTC-9011',
-      billType: 'SUPPLIER',
-      supplier: 'บจก. สหพาณิชย์ คอนกรีต',
-      vehicleReg: '83-1122 นม',
-      itemDesc: 'คอนกรีตผสมเสร็จ Lean 180 ksc',
-      qty: 12,
-      unit: 'คิว',
-      pricePerUnit: 1750,
-      totalAmount: 21000,
-      isSubcontractorDeduction: true,
-      subcontractorName: 'ช่างสมชาย (เทลีนท่อ)',
-      remarks: 'หักเงินค่างวดช่างสมชาย งวดที่ 2'
-    }
-  ];
-
-  const chosen = mockTickets[Math.floor(Math.random() * mockTickets.length)];
-  const simulatedBill: BotBill = {
-    id: `BOT-${Date.now().toString().slice(-6)}`,
-    source: 'GOOGLE_DRIVE_FOLDER (1Z6-WNDovLWEYQsYllTTPCDLIwQt3ufjx)',
-    driveFileName: `IMG_${Date.now().toString().slice(-4)}_receipt.jpg`,
-    driveFileId: '1Z6-WNDovLWEYQsYllTTPCDLIwQt3ufjx',
-    driveFileUrl: 'https://drive.google.com/drive/folders/1Z6-WNDovLWEYQsYllTTPCDLIwQt3ufjx?usp=sharing',
-    receivedAt: new Date().toISOString(),
-    status: 'PENDING_MATCH',
-    data: {
-      ...chosen,
-      projectId: 'PRJ-DOH-24',
-      projectName: 'ทล.24 ตอน 2'
-    }
-  };
-
-  botBillsBuffer.unshift(simulatedBill);
-  return res.json({ success: true, bill: simulatedBill });
 });
 
 // Mount Vite middleware in development

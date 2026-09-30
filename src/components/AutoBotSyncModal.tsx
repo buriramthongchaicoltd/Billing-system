@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { 
   X, Bot, FolderCheck, Check, Copy, RefreshCw, 
-  ExternalLink, CheckCircle2, Database, Play, ArrowRight, Clock, FileCode,
+  ExternalLink, CheckCircle2, Database, ArrowRight, Clock, FileCode,
   UploadCloud, DownloadCloud, AlertCircle, Sparkles, Layers, MessageSquare,
-  Loader2, FileText, CheckCheck, Truck, Scale, ShieldCheck
+  Loader2, FileText, CheckCheck, Truck, Scale
 } from 'lucide-react';
 import { 
   getSavedSupabaseConfig, 
@@ -66,7 +66,6 @@ export const AutoBotSyncModal: React.FC<AutoBotSyncModalProps> = ({
   // Live Bot Bills state
   const [liveBotBills, setLiveBotBills] = useState<any[]>([]);
   const [isLoadingBotBills, setIsLoadingBotBills] = useState(false);
-  const [isSimulating, setIsSimulating] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const showToast = (msg: string, _type?: string) => {
@@ -186,119 +185,6 @@ export const AutoBotSyncModal: React.FC<AutoBotSyncModalProps> = ({
     }
   };
 
-  // Real AI Scanner for Drive bills: ดึง"ไฟล์จริง"จากโฟลเดอร์ Google Drive ผ่าน backend
-  // แล้วส่งแต่ละไฟล์เข้า /api/scan-drive-file ให้ Gemini AI อ่านเนื้อหาบนภาพจริง (ไม่ใช้ข้อมูลตัวอย่าง hardcoded อีกต่อไป)
-  const handleRunDriveAiScan = async (batchCount: number = 10) => {
-    setIsBatchAiScanning(true);
-    showToast(`🤖 กำลังดึงรายการไฟล์บิลจริงจากโฟลเดอร์ Google Drive (สูงสุด ${batchCount} ไฟล์)...`, 'info');
-
-    try {
-      // 1. ขอรายชื่อไฟล์จริงจากโฟลเดอร์ (backend จะไปอ่าน Drive ให้ — หน้าเว็บต้องรันบนเครื่องที่มี server)
-      const listRes = await fetch('/api/drive-list-files', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folderId: folderId, limit: batchCount })
-      });
-      const listData = await listRes.json().catch(() => ({ success: false, error: 'เซิร์ฟเวอร์ตอบกลับไม่ถูกต้อง' }));
-
-      if (!listRes.ok || !listData.success) {
-        setIsBatchAiScanning(false);
-        setScanProgress(null);
-        showToast(`❌ ดึงรายการไฟล์จาก Drive ไม่สำเร็จ: ${listData.error || ('HTTP ' + listRes.status)} — (ฟีเจอร์นี้ต้องรันบนเซิร์ฟเวอร์ที่มี backend เช่น npm run dev หรือ Render; GitHub Pages ไม่มี /api)`, 'error');
-        return;
-      }
-
-      const driveFiles: { fileId: string; fileName: string }[] = listData.files || [];
-      if (driveFiles.length === 0) {
-        setIsBatchAiScanning(false);
-        setScanProgress(null);
-        showToast('📭 ไม่พบไฟล์รูปภาพ/PDF ในโฟลเดอร์นี้ (โปรดตรวจว่าโฟลเดอร์เปิดแชร์ลิงก์และมีไฟล์บิลอยู่จริง)', 'info');
-        return;
-      }
-
-      showToast(`🔎 พบไฟล์บิลจริง ${driveFiles.length} ไฟล์ — เริ่มส่งให้ AI อ่านเนื้อหาทีละใบ...`, 'info');
-
-      let successCount = 0;
-      let skippedCount = 0;
-      let failCount = 0;
-      let aiUnavailableCount = 0;
-      const skippedAiFiles: string[] = [];
-      const results: any[] = [];
-
-      for (let i = 0; i < driveFiles.length; i++) {
-        const f = driveFiles[i];
-        setScanProgress({
-          current: i + 1,
-          total: driveFiles.length,
-          fileName: f.fileName,
-          billNo: '-',
-          supplier: '-',
-          weight: 'กำลังส่งให้ AI อ่าน...'
-        });
-
-        try {
-          // 2. สแกนไฟล์จริงทีละใบ (backend ดึงรูปจาก Drive แล้วให้ Gemini อ่านของจริง)
-          const scanRes = await fetch('/api/scan-drive-file', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ driveFileId: f.fileId, fileName: f.fileName })
-          });
-          const scanJson = await scanRes.json().catch(() => ({ success: false, error: 'เซิร์ฟเวอร์ตอบกลับไม่ถูกต้อง' }));
-
-          if (scanJson.success && scanJson.data) {
-            const doc = scanJson.data;
-            // 🔒 นโยบาย "ห้ามเดา": ถ้า AI อ่านไม่ได้และ backend ส่งข้อมูลจากชื่อไฟล์มา (isAiFallback)
-            // = ข้อมูลอาจไม่ตรงกับใบจริง → ข้ามใบนี้ ไม่ส่งเข้าตารางเด็ดขาด
-            if (doc.isAiFallback || doc.quotaExceeded) {
-              aiUnavailableCount++;
-              skippedAiFiles.push(f.fileName);
-              failCount++;
-              continue;
-            }
-            // แนบข้อมูลต้นทาง Drive เพื่อให้ระบบกันบิลซ้ำเช็คด้วยไฟล์ ID ได้
-            doc.driveFileId = f.fileId;
-            doc.remarks = doc.remarks || `[Drive] ${f.fileName}`;
-            onImportBotBill(doc);
-            results.push(doc);
-            successCount++;
-          } else if (scanRes.status === 422 || scanJson.code === 'AI_UNAVAILABLE') {
-            // AI อ่านใบจริงไม่สำเร็จ (โควต้าเต็ม/บริการล่ม) — ระบบไม่เดาจากชื่อไฟล์ → ข้ามใบนี้
-            aiUnavailableCount++;
-            skippedAiFiles.push(f.fileName);
-            failCount++;
-          } else if (scanRes.status === 404) {
-            // ดึงรูปจาก Drive ไม่ได้ (ส่วนใหญ่เพราะไฟล์ไม่ได้เปิดแชร์ลิงก์)
-            skippedCount++;
-          } else {
-            failCount++;
-          }
-        } catch (err) {
-          console.error(`Error scanning ${f.fileName}:`, err);
-          failCount++;
-        }
-
-        // พักระหว่างคิว ป้องกันยิง AI ถี่เกิน (โควต้า)
-        await new Promise(r => setTimeout(r, 800));
-      }
-
-      setScannedHistory(prev => [...results, ...prev]);
-      setScanProgress(null);
-      setIsBatchAiScanning(false);
-
-      if (aiUnavailableCount > 0) {
-        showToast(`⚠️ สแกนจบ: อ่านได้จริง ${successCount} ใบ | AI อ่านไม่สำเร็จ ${aiUnavailableCount} ใบ (ระบบไม่เดาจากชื่อไฟล์ — ข้ามไว้ โปรดกดสแกนซ้ำภายหลัง เช่น ตรวจ GEMINI_API_KEY/โควต้าแล้ว) | ดึงรูปไม่ได้ ${skippedCount} ใบ`, 'info');
-      } else if (skippedCount > 0 || failCount > 0) {
-        showToast(`📊 สแกนจาก Drive เสร็จ: สำเร็จ ${successCount} ใบ | ข้าม (ดึงรูปไม่ได้ โปรดเปิดแชร์ลิงก์ไฟล์) ${skippedCount} ใบ | ล้มเหลว ${failCount} ใบ`, 'info');
-      } else {
-        showToast(`🎉 AI สแกนบิล"จริง"จาก Google Drive สำเร็จครบ ${successCount}/${driveFiles.length} ใบ! ข้อมูลลงตาราง 38 คอลัมน์และ Supabase เรียบร้อย`, 'success');
-      }
-    } catch (err: any) {
-      setIsBatchAiScanning(false);
-      setScanProgress(null);
-      showToast(`❌ สแกนจาก Drive ขัดข้อง: ${err.message || err} — (ฟีเจอร์นี้ต้องรันบนเซิร์ฟเวอร์ที่มี backend; GitHub Pages ไม่มี /api)`, 'error');
-    }
-  };
-
   // 🔁 Full Drive Sync: ดึง"ครบทุกไฟล์"ในโฟลเดอร์ (ทะลุทุกโฟลเดอร์ย่อย ไม่จำกัดจำนวน)
   // ทำทีละไฟล์: ดึงลิงก์→แปลงเป็นภาพ→AI อ่าน→บันทึกประวัติ (drive_sync_logs)
   // ไฟล์ที่เคยทำสำเร็จแล้วจะถูกข้าม — กดซ้ำได้เรื่อยๆ จนกว่าจะครบทุกไฟล์ (ไม่ตกหล่น)
@@ -404,23 +290,6 @@ export const AutoBotSyncModal: React.FC<AutoBotSyncModalProps> = ({
       setIsBatchAiScanning(false);
       setScanProgress(null);
       showToast(`❌ Sync ขัดข้อง: ${err.message || err} — (ฟีเจอร์นี้ต้องรันบนเซิร์ฟเวอร์ที่มี backend)`, 'error');
-    }
-  };
-
-  // Simulate Bot Push
-  const handleSimulateBotPush = async () => {
-    setIsSimulating(true);
-    try {
-      const res = await fetch('/api/simulate-bot-push', { method: 'POST' });
-      const data = await res.json();
-      if (data.success) {
-        await fetchBotBills();
-        alert(`🤖 จำลองการดูดบิลจากโฟลเดอร์สำเร็จ! ได้รับบิล ${data.bill.data.docNo}`);
-      }
-    } catch (e) {
-      alert('เกิดข้อผิดพลาดในการจำลองส่งบิล');
-    } finally {
-      setIsSimulating(false);
     }
   };
 
@@ -1666,15 +1535,6 @@ function getProcessedFileIds() {
           </div>
           <div className="flex items-center space-x-2">
             <button
-              onClick={handleSimulateBotPush}
-              disabled={isSimulating}
-              className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold flex items-center space-x-1.5 transition shadow-xs cursor-pointer"
-              title="ทดสอบเสมือนว่าสคริปต์ใน Google Drive ตรวจพบรูปใหม่แล้วดูดส่งเข้ามา"
-            >
-              <Play className="w-3.5 h-3.5 text-amber-300" />
-              <span>{isSimulating ? 'กำลังทดสอบ...' : '⚡ ทดสอบดึงบิลจาก Drive เข้ามา'}</span>
-            </button>
-            <button
               onClick={fetchBotBills}
               disabled={isLoadingBotBills}
               className="p-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs cursor-pointer"
@@ -1727,148 +1587,30 @@ function getProcessedFileIds() {
           {/* TAB 1: 24/7 AUTO-PILOT INGESTION & KEYING */}
           {activeTab === 'ai_drive_scan' && (
             <div className="space-y-4">
-              {/* Core Reassurance Callout: No manual clicking required */}
-              <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-100 border-2 border-emerald-400 p-4 rounded-xl shadow-xs space-y-2">
-                <div className="flex items-center space-x-2 text-emerald-900 font-extrabold text-sm sm:text-base">
-                  <span className="p-1 rounded-lg bg-emerald-600 text-white">
-                    <CheckCircle2 className="w-4 h-4" />
-                  </span>
-                  <span>ยืนยัน: คุณ "ไม่ต้อง" มานั่งกดปุ่มสแกนเองเลยครับ! ระบบเป็น Auto-Pilot 24 ชม.</span>
-                </div>
-                <p className="text-emerald-950 text-xs leading-relaxed">
-                  ถ้าต้องมานั่งกดปุ่ม <strong>"⚡ สแกนบิล AI"</strong> เองทุกรอบ ก็ไม่มีประโยชน์ที่จะเชื่อมต่อกับ Google Drive จริงไหมครับ! 
-                  ระบบนี้ถูกสร้างขึ้นมาเพื่อให้คุณมี <strong>"ผู้ช่วยคีย์ข้อมูลส่วนตัว"</strong> ทำงานเบื้องหลังตลอด 24 ชั่วโมง 
-                  แม้คุณจะปิดหน้าเว็บหรือปิดเครื่องคอมพิวเตอร์ไปแล้วก็ตาม
-                </p>
-                <div className="bg-white/90 border border-emerald-300 rounded-lg p-3 text-xs text-emerald-900 space-y-1">
-                  <div className="font-bold flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                    <span>หน้าที่ของคุณมีเพียงอย่างเดียว:</span>
-                  </div>
-                  <p className="text-slate-700 leading-normal pl-3.5">
-                    👉 เมื่อสะดวก เพียงแค่เปิดหน้าเว็บเข้ามาเพื่อ <strong>"ตรวจสอบความถูกต้องของข้อมูลที่ AI คีย์รอไว้แล้ว"</strong> 
-                    และ <strong>"ตรวจสอบผลการจับคู่บิล / กดชนบิล"</strong> เท่านั้นครับ!
-                  </p>
-                </div>
+              {/* สรุปสั้น: ระบบทำอะไร + คุณต้องทำอะไร */}
+              <div className="bg-emerald-50 border border-emerald-300 p-3 rounded-xl text-xs text-emerald-950 flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="font-bold flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  Drive → AI อ่าน → คีย์ลงตาราง อัตโนมัติ (กันบิลซ้ำให้ 3 ชั้น)
+                </span>
+                <span className="text-emerald-800">หน้าที่คุณ: เข้ามาตรวจข้อมูล + กดชนบิลเท่านั้น</span>
               </div>
 
-              {/* 5-Step Visual Pipeline */}
-              <div className="bg-white border-2 border-slate-200 rounded-xl p-4 shadow-2xs space-y-3">
-                <h5 className="font-bold text-slate-900 text-xs flex items-center justify-between">
-                  <span>🔄 แผนผังการทำงานอัตโนมัติแบบไร้รอยต่อ (End-to-End Pipeline):</span>
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
-                    อัตโนมัติ 100% ไม่ต้องกดเอง
-                  </span>
-                </h5>
-
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-2.5 text-[11px]">
-                  {/* Step 1 */}
-                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-1">
-                    <div className="font-bold text-slate-800 flex items-center gap-1">
-                      <span className="w-4 h-4 rounded-full bg-blue-600 text-white text-[10px] flex items-center justify-center font-mono">1</span>
-                      <span>ส่งรูปเข้ากลุ่ม LINE</span>
-                    </div>
-                    <p className="text-slate-500 text-[10px] leading-tight">
-                      คนขับรถ / วิศวกร / โรงโม่ ส่งภาพบิลและตั๋วชั่งเข้ามาในกลุ่ม LINE โครงการ
-                    </p>
-                  </div>
-
-                  {/* Step 2 */}
-                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-1">
-                    <div className="font-bold text-slate-800 flex items-center gap-1">
-                      <span className="w-4 h-4 rounded-full bg-blue-600 text-white text-[10px] flex items-center justify-center font-mono">2</span>
-                      <span>เซฟลง Google Drive</span>
-                    </div>
-                    <p className="text-slate-500 text-[10px] leading-tight">
-                      รูปจะถูกรวบรวมเข้ามาเก็บในโฟลเดอร์ Google Drive อย่างต่อเนื่อง
-                    </p>
-                  </div>
-
-                  {/* Step 3 */}
-                  <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-lg space-y-1">
-                    <div className="font-bold text-emerald-900 flex items-center gap-1">
-                      <span className="w-4 h-4 rounded-full bg-emerald-600 text-white text-[10px] flex items-center justify-center font-mono">3</span>
-                      <span>บอทตรวจจับ & AI อ่าน</span>
-                    </div>
-                    <p className="text-emerald-800 text-[10px] leading-tight">
-                      สคริปต์ตรวจจับไฟล์ใหม่ทุก 1 นาที และส่งให้ Gemini AI อ่านตัวเลขจริงในกระดาษ 24 ชม.
-                    </p>
-                  </div>
-
-                  {/* Step 4 */}
-                  <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-lg space-y-1">
-                    <div className="font-bold text-emerald-900 flex items-center gap-1">
-                      <span className="w-4 h-4 rounded-full bg-emerald-600 text-white text-[10px] flex items-center justify-center font-mono">4</span>
-                      <span>คีย์ลงตารางทันที</span>
-                    </div>
-                    <p className="text-emerald-800 text-[10px] leading-tight">
-                      บันทึกเข้าตาราง 38 คอลัมน์ และกล่องพักรอชนบิลใน Supabase Cloud ให้อัตโนมัติ
-                    </p>
-                  </div>
-
-                  {/* Step 5 */}
-                  <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg space-y-1">
-                    <div className="font-bold text-amber-900 flex items-center gap-1">
-                      <span className="w-4 h-4 rounded-full bg-amber-600 text-white text-[10px] flex items-center justify-center font-mono">5</span>
-                      <span>คุณเข้ามาตรวจ & ชนบิล</span>
-                    </div>
-                    <p className="text-amber-800 text-[10px] leading-tight">
-                      เปิดหน้าเว็บมาดูตัวเลขที่คีย์รอไว้แล้ว แก้ไขจุดที่ต้องการ และกดยืนยันการจับคู่บิล!
-                    </p>
-                  </div>
+              {/* สถานะโฟลเดอร์ที่ใช้งานจริง */}
+              <div className="flex flex-wrap items-center gap-3 text-xs">
+                <div className="flex items-center space-x-1.5 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200 font-mono text-slate-800">
+                  <FolderCheck className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>โฟลเดอร์ Drive: {folderId}</span>
                 </div>
-
-                <div className="flex flex-wrap items-center gap-3 pt-1 text-xs">
-                  <div className="flex items-center space-x-1.5 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200 font-mono text-slate-800">
-                    <FolderCheck className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>โฟลเดอร์ Google Drive: {folderId} (BTC_Purchasing_Receipts)</span>
-                  </div>
-                  <a 
-                    href={folderUrl} 
-                    target="_blank" 
-                    rel="noreferrer" 
-                    className="text-blue-700 hover:text-blue-900 underline flex items-center space-x-1 font-semibold"
-                  >
-                    <span>เปิดดูโฟลเดอร์จริงใน Google Drive</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                </div>
-              </div>
-
-              {/* 🛡️ 3-Tier Anti-Duplicate Guard Card */}
-              <div className="bg-amber-50/70 border-2 border-amber-300 rounded-xl p-4 shadow-xs space-y-2">
-                <div className="flex items-center space-x-2 text-amber-950 font-bold text-xs sm:text-sm">
-                  <span className="p-1 rounded-md bg-amber-500 text-slate-950">
-                    <ShieldCheck className="w-4 h-4" />
-                  </span>
-                  <span>🛡️ ระบบป้องกันบิลซ้ำ 3 ชั้น (Anti-Duplicate Guard Engine):</span>
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
-                    ทำงานอัตโนมัติ
-                  </span>
-                </div>
-                <p className="text-amber-900 text-xs leading-relaxed">
-                  ไม่ต้องกังวลเรื่องข้อมูลเบิ้ลครับ! ก่อนที่ AI จะบันทึกหรือคีย์ข้อมูลลงตาราง ระบบจะทำการตรวจเช็กอย่างละเอียด 3 ชั้น:
-                </p>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-[11px]">
-                  <div className="p-2.5 bg-white rounded-lg border border-amber-200 space-y-0.5 shadow-2xs">
-                    <strong className="text-slate-900 block">1. ตรวจเลขที่บิล / ตั๋วชั่ง</strong>
-                    <span className="text-slate-600 text-[10px]">
-                      เช็กเลขที่ DO, Ticket No. และ Ref No. กับทั้งในตารางหลักและกล่องพัก ถ้ามีแล้วจะ <strong>"ข้ามทันที"</strong>
-                    </span>
-                  </div>
-                  <div className="p-2.5 bg-white rounded-lg border border-amber-200 space-y-0.5 shadow-2xs">
-                    <strong className="text-slate-900 block">2. ตรวจ File ID ใน Drive</strong>
-                    <span className="text-slate-600 text-[10px]">
-                      บันทึกประวัติไฟล์ที่เคยดึงแล้วลงทะเบียน เพื่อไม่ให้บอทส่งไฟล์เดิมซ้ำแม้จะรันกี่รอบ
-                    </span>
-                  </div>
-                  <div className="p-2.5 bg-white rounded-lg border border-amber-200 space-y-0.5 shadow-2xs">
-                    <strong className="text-slate-900 block">3. ตรวจ วันที่ + ทะเบียน + นน.</strong>
-                    <span className="text-slate-600 text-[10px]">
-                      ป้องกันกรณีถ่ายรูปบิลใบเดิมซ้ำ 2 รูปใน LINE หากวัน, ทะเบียน และนน. ตรงกัน ระบบจะรวมรูปและไม่สร้างแถวเบิ้ล
-                    </span>
-                  </div>
-                </div>
+                <a 
+                  href={folderUrl} 
+                  target="_blank" 
+                  rel="noreferrer" 
+                  className="text-blue-700 hover:text-blue-900 underline flex items-center space-x-1 font-semibold"
+                >
+                  <span>เปิดดูโฟลเดอร์จริงใน Google Drive</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
               </div>
 
               {/* Scanned & Ingested Results */}
@@ -1937,22 +1679,6 @@ function getProcessedFileIds() {
                     >
                       {isBatchAiScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                       <span>{isBatchAiScanning ? 'กำลัง Sync ทีละไฟล์...' : '🔄 Sync ทั้งหมด (ครบทุกไฟล์ ไม่ตกหล่น)'}</span>
-                    </button>
-                    <button
-                      onClick={() => handleRunDriveAiScan(10)}
-                      disabled={isBatchAiScanning}
-                      className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer disabled:opacity-50"
-                      title="กดทดสอบให้ AI อ่านตัวอย่างบิล 10 ใบจาก Drive ทันที"
-                    >
-                      {isBatchAiScanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-amber-300" />}
-                      <span>{isBatchAiScanning ? 'กำลังอ่านและคีย์บิล...' : '⚡ ทดสอบสแกนทันที (10 บิล)'}</span>
-                    </button>
-                    <button
-                      onClick={() => handleRunDriveAiScan(50)}
-                      disabled={isBatchAiScanning}
-                      className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg text-xs font-medium transition cursor-pointer disabled:opacity-50"
-                    >
-                      <span>สแกน 50 บิล</span>
                     </button>
                   </div>
 
